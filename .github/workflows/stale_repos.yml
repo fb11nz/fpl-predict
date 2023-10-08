@@ -18,8 +18,8 @@ jobs:
       uses: docker://ghcr.io/github/stale_repos:v1
       env:
         GH_TOKEN: ${{ secrets.ZOZONZ_SUBMODULES_ACCESS_TOKEN }}
+        ORGANIZATION: "zozonz"
         INACTIVE_DAYS: 365
-        EXEMPT_REPOS: "lib-ceres-*, lib-cryptopp-*, lib-testhelpers-*"
 
     - name: Create issue
       uses: peter-evans/create-issue-from-file@v4
