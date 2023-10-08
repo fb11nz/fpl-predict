@@ -17,8 +17,8 @@ jobs:
     - name: Run stale_repos tool
       uses: docker://ghcr.io/github/stale_repos:v1
       env:
-        GH_TOKEN: ${{ secrets.ZOZONZ_DOCKER_ACCESS_TOKEN }}
-        ORGANIZATION: "zozonz"
+        GH_TOKEN: ${{ secrets.ZOZONZ_ACCESS_TOKEN }}
+        ORGANIZATION: 'zozonz'
         INACTIVE_DAYS: 365
 
     - name: Create issue
