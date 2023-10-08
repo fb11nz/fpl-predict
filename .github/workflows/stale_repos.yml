@@ -1,0 +1,29 @@
+name: stale repo identifier
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '3 2 1 * *'
+
+jobs:
+  build:
+    name: stale repo identifier
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Run stale_repos tool
+      uses: docker://ghcr.io/github/stale_repos:v1
+      env:
+        GH_TOKEN: ${{ secrets.ZOZONZ_SUBMODULES_ACCESS_TOKEN }}
+        INACTIVE_DAYS: 365
+        EXEMPT_REPOS: "lib-ceres-*, lib-cryptopp-*, lib-testhelpers-*"
+
+    - name: Create issue
+      uses: peter-evans/create-issue-from-file@v4
+      with:
+        title: Stale repository report
+        content-filepath: ./stale_repos.md
+        assignees: francisbilham11
