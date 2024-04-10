@@ -1,18 +1,6 @@
-# DevOps
-This repositories hosts an assortment of tools used for DevOps purposes.
+# isms
 
-## Stale repositories
-The workflow `.github/workflows/state_repos.yml` identifies and reports repositories with no activity for a configurable amount of time (currently set at 365 days). A repository is considered inactive if it has not had a `push` action.
-
-There are exceptions to this rule, such as our repositories that house binaries. The contents of these repositories are frequently cloned and pulled, but there may not be active development on them for extended periods of time.
-
-## AWS helper scripts
-
-Instructions for using `aws_role_switching.py` can be found [here](https://zozonz.atlassian.net/wiki/spaces/DEV/pages/1744011287/Changing+AWS+IAM+roles+using+CLI). 
-
-## ISMS
-
-### Export scripts
+## Export scripts
 
 Both scripts have the same logic: take a spreadsheet as input and re-order the columns to match the desired output
 `column_header` is nickname of the output columns (their actual string doesn't really matter)
@@ -45,3 +33,6 @@ which will set a default date if the field is empty
 5. Open and check the output file in Excel: `user_trial_ready.csv`
 6. There is a bug between Excel and Google Spreadsheet: if a cell's content is overflowing and showing #######, the copy paste will fail!! You must first expand the column such that the content is visible
 7. Copy/paste into ISMS document
+
+
+
