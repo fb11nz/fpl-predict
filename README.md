@@ -10,6 +10,9 @@ There are exceptions to this rule, such as our repositories that house binaries.
 
 Instructions for using `aws_role_switching.py` can be found [here](https://zozonz.atlassian.net/wiki/spaces/DEV/pages/1744011287/Changing+AWS+IAM+roles+using+CLI). 
 
+## Employee status
+These scripts monitor devices on the ZOZONZ network in order to record employees' attendance in the office. Attendance is recorded on this [spreadsheet](https://docs.google.com/spreadsheets/d/1RrY0qPg9hI747OE7oAZIbIrGvc6GBduSdFTZ_KwKYV4/edit#gid=853399978). The scripts also read from the shared Google availability calendar to record leave.
+
 ## ISMS
 
 ### Export scripts
