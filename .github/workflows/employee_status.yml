@@ -46,7 +46,7 @@ jobs:
         id: slack
         uses: slackapi/slack-github-action@v1.25.0
         with:
-          channel-id: zznz-it
+          channel-id: C03T7PPA6JV
           slack-message: "Employee status script result: ${{ job.status }}"
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
