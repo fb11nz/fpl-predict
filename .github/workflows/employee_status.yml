@@ -30,11 +30,15 @@ jobs:
           pip install -U pip
           pip install -r requirements.txt
 
+      - name: Write to json file
+        id: write-to-json
+        working-directory: employee-status
+        run: echo ${{ secrets.EMPLOYEE_STATUS_GCP_JSON }} >> "Employee status ZzShoe demo.json"
+
       - name: Run employee_status tool
         id: run-employee_status
         working-directory: employee-status
-        run: |
-          python employee_status.py
+        run: python employee_status.py
         env:
           MERAKI_API_KEY: ${{ secrets.MERAKI_API_KEY }}
 
