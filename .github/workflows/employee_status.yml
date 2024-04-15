@@ -1,0 +1,46 @@
+name: employee status
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 8-18/2 * * 1-5'
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  build:
+    name: employee status
+    runs-on: [self-hosted, linux]
+
+    steps:
+      - name: Checkout code
+        id: checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        id: set-up-python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        id: install-dependencies
+        working-directory: employee_status
+        run: |
+          pip install -U pip
+          pip install -r requirements.txt
+
+      - name: Run employee_status tool
+        id: run-employee_status
+        working-directory: employee_status
+        run: |
+          python employee_status.py
+
+      - name: Post to Slack channel
+        id: slack
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          channel-id: zznz-it
+          slack-message: "Employee status script result: ${{ job.status }}"
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
