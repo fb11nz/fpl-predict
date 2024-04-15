@@ -33,7 +33,7 @@ jobs:
       - name: Write to json file
         id: write-to-json
         working-directory: employee-status
-        run: echo ${{ secrets.EMPLOYEE_STATUS_GCP_JSON }} | base64 --decode > "Employee status ZzShoe demo.json"
+        run: echo "${{ secrets.EMPLOYEE_STATUS_GCP_JSON }}" | base64 --decode > "Employee status ZzShoe demo.json"
 
       - name: Run employee_status tool
         id: run-employee_status
