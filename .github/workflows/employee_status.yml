@@ -1,0 +1,51 @@
+name: employee status
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 8-18/2 * * 1-5'
+
+jobs:
+  build:
+    name: employee status
+    runs-on: [self-hosted, linux]
+
+    steps:
+      - name: Checkout code
+        id: checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        id: set-up-python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        id: install-dependencies
+        working-directory: employee-status
+        run: |
+          pip install -U pip
+          pip install -r requirements.txt
+
+      - name: Write to json file
+        id: write-to-json
+        working-directory: employee-status
+        run: echo "${{ secrets.EMPLOYEE_STATUS_GCP_JSON }}" | base64 --decode > "Employee status ZzShoe demo.json"
+
+      - name: Run employee_status tool
+        id: run-employee_status
+        working-directory: employee-status
+        run: python employee_status.py
+        env:
+          MERAKI_API_KEY: ${{ secrets.MERAKI_API_KEY }}
+
+      - name: Post to Slack channel
+        id: slack
+        if: failure()
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          channel-id: C03T7PPA6JV
+          slack-message: "Employee status script result: ${{ job.status }}"
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

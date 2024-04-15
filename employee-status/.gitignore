@@ -1,0 +1,6 @@
+.env
+venv
+*.pyc
+__pycache__
+Employee status ZzShoe demo.json
+.idea
