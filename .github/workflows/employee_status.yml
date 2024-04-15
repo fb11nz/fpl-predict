@@ -35,6 +35,8 @@ jobs:
         working-directory: employee-status
         run: |
           python employee_status.py
+        env:
+          MERAKI_API_KEY: ${{ secrets.MERAKI_API_KEY }}
 
       - name: Post to Slack channel
         id: slack
