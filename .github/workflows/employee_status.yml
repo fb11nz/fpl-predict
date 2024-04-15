@@ -25,14 +25,14 @@ jobs:
 
       - name: Install dependencies
         id: install-dependencies
-        working-directory: employee_status
+        working-directory: employee-status
         run: |
           pip install -U pip
           pip install -r requirements.txt
 
       - name: Run employee_status tool
         id: run-employee_status
-        working-directory: employee_status
+        working-directory: employee-status
         run: |
           python employee_status.py
 
