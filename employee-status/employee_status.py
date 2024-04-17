@@ -193,7 +193,6 @@ def send_to_google_sheet(df_filtered):
 
 def main():
     api_key = os.getenv('MERAKI_API_KEY')
-    org_id = "601793500207411081"
     network_id = "L_601793500207435626"
     headers = {
         "X-Cisco-Meraki-API-Key": api_key
@@ -210,9 +209,11 @@ def main():
     devices = response.json()
     df = pl.DataFrame(devices)
     windows_devices = pl.col("os").str.contains("Windows")
-    mac_devices = pl.col("deviceTypePrediction").str.contains("MacBook")
+    mac_devices = pl.col("deviceTypePrediction").str.contains("MacBook") | pl.col("description").str.contains(
+        "MacBook")
     combined_filter = windows_devices | mac_devices
     df_filtered = df.filter(combined_filter)
+    df_filtered = df_filtered.unique(subset='description', keep='first')
     today = datetime.date.today()
     df_filtered = df_filtered.with_columns(
         pl.col('lastSeen').str.strptime(pl.Datetime, "%Y-%m-%dT%H:%M:%SZ").dt.convert_time_zone(
