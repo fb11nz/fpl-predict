@@ -1,0 +1,33 @@
+name: code counter
+
+on:
+  workflow_dispatch: 
+    inputs:
+      org_or_user:
+        description: 'The org (or user) to calculate total lines of code'
+        required: false
+        type: string
+
+env:
+  GITHUB_TOKEN: ${{ secrets.ZOZONZ_SUBMODULES_ACCESS_TOKEN }}
+
+jobs:
+  count:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        run: git clone https://github.com/benbalter/count-org-loc
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
+          ruby-version: 3.0
+
+      - name: script/bootstrap
+        working-directory: count-org-loc
+        run: script/bootstrap
+      
+      - name: count workflow dispatch
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: count-org-loc
+        run: script/count ${{ inputs.org_or_user }}
