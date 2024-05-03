@@ -9,7 +9,7 @@ on:
         type: string
 
 env:
-  GITHUB_TOKEN: ${{ secrets.ZOZONZ_SUBMODULES_ACCESS_TOKEN }}
+  GITHUB_TOKEN: ${{ secrets.ORG_GITHUB_TOKEN }}
 
 jobs:
   count:
