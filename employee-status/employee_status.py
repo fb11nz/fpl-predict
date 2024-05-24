@@ -54,7 +54,6 @@ def send_to_google_sheet(df_filtered):
     # Get the current month name
     today = datetime.date.today()
     month_name = today.strftime("%B")
-    # month_name = "June"
     year_name = today.strftime("%Y")
     sheet_name = f'{year_name} {month_name}'
 
