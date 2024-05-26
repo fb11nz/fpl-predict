@@ -43,17 +43,6 @@ def filter_event_summaries_by_name(events: list[dict], name: str) -> list[str]:
 
 
 def send_to_google_sheet(df_filtered):
-    device_name_idx = df_filtered.columns.index("description")
-    in_office_idx = df_filtered.columns.index("inOffice")
-    devices_info = []
-    for row in df_filtered.iter_rows():
-        devices_info.append(
-            DeviceInfo(
-                DeviceName=row[device_name_idx],
-                InOffice=row[in_office_idx]
-            )
-        )
-
     events_today = shared_calendar.get_calendar_events_for_today()
     # Authentication
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -75,11 +64,30 @@ def send_to_google_sheet(df_filtered):
         row[1]: row[0] for row in person_device_sheet.get_all_values()[1:]
     }
 
+    device_name_idx = df_filtered.columns.index("description")
+    in_office_idx = df_filtered.columns.index("inOffice")
+    devices_info = []
+    employee_main_devices_info = []
+    for row in df_filtered.iter_rows():
+        if row[device_name_idx] in person_lookup_data:
+            employee_main_devices_info.append(
+                DeviceInfo(
+                    DeviceName=row[device_name_idx],
+                    InOffice=row[in_office_idx]
+                )
+            )
+        devices_info.append(
+            DeviceInfo(
+                DeviceName=row[device_name_idx],
+                InOffice=row[in_office_idx]
+            )
+        )
+
     # add missing devices
-    all_devices = [x.DeviceName for x in devices_info]
+    all_devices = [x.DeviceName for x in employee_main_devices_info]
     for device, person_name in person_lookup_data.items():
         if device not in all_devices:
-            devices_info.append(
+            employee_main_devices_info.append(
                 DeviceInfo(
                     DeviceName=device,
                     InOffice='Offline'
@@ -107,7 +115,7 @@ def send_to_google_sheet(df_filtered):
 
     # Prepare device names
     existing_devices = worksheet.col_values(2)[1:]  # Fetch excluding header
-    all_devices = [x.DeviceName for x in devices_info]
+    all_devices = [x.DeviceName for x in employee_main_devices_info]
     new_devices = sorted([dev for dev in all_devices if dev not in existing_devices])
     if new_devices:  # Update only if there are new devices
         next_empty_row = len(existing_devices) + 2  # Start after existing data
@@ -121,7 +129,7 @@ def send_to_google_sheet(df_filtered):
     target_column = day_of_month + 2  # Adjust if your columns start from a different index
 
     # Extract descriptions and update cells
-    for i, device in enumerate(devices_info):
+    for i, device in enumerate(employee_main_devices_info):
         row = devices.index(device.DeviceName) + 2
         col = target_column
 
@@ -140,7 +148,14 @@ def send_to_google_sheet(df_filtered):
             event_summaries = []
         public_holiday = len(filter_event_summaries_by_name(events_today, "public holiday")) > 0
         if device.InOffice == "Online":
-            cell_format = CellFormat(range=cell.address, format={"backgroundColor": {"red": 0, "green": 1, "blue": 0}})
+            cell_format = CellFormat(
+                range=cell.address,
+                format={
+                    "backgroundColor": {"red": 0, "green": 1, "blue": 0},
+                    "textFormat": {"foregroundColor": {"red": 0, "green": 1, "blue": 0}}
+                }
+            )
+            cell = Cell(row=row, col=col, value="1")
         elif public_holiday:
             cell_format = CellFormat(range=cell.address,
                                      format={"backgroundColor": {"red": 1, "green": 0.8, "blue": 0.6}})
@@ -152,6 +167,7 @@ def send_to_google_sheet(df_filtered):
                                      format={"backgroundColor": {"red": 1, "green": 0.75, "blue": 0.2}})
         else:
             cell_format = CellFormat(range=cell.address, format={"backgroundColor": {"red": 1, "green": 1, "blue": 1}})
+        all_cells.append(cell)
         all_cell_formats.append(cell_format)
     worksheet.update_cells(all_cells)
     worksheet.batch_format(all_cell_formats)
@@ -167,6 +183,7 @@ def send_to_google_sheet(df_filtered):
 
     device_name_idx = df_filtered.columns.index("description")
     in_office_idx = df_filtered.columns.index("inOffice")
+    all_devices = [x.DeviceName for x in devices_info]
     devices = sorted(all_devices)
     for i, df_row in enumerate(df_filtered.iter_rows()):
         device_name = df_row[device_name_idx]
@@ -207,7 +224,12 @@ def main():
     if response.status_code != 200:
         raise RuntimeError(f"HTTP status code {response.status_code}: {response.text}")
     devices = response.json()
-    df = pl.DataFrame(devices)
+
+    # Normalise data structure
+    all_keys = set(key for device in devices for key in device.keys())
+    normalised_devices = [{key: device.get(key) for key in all_keys} for device in devices]
+
+    df = pl.DataFrame(normalised_devices, infer_schema_length=5000)
     windows_devices = pl.col("os").str.contains("Windows")
     mac_devices = pl.col("deviceTypePrediction").str.contains("MacBook") | pl.col("description").str.contains(
         "MacBook")
