@@ -165,6 +165,9 @@ def send_to_google_sheet(df_filtered):
         elif any('sick' in x for x in event_summaries):
             cell_format = CellFormat(range=cell.address,
                                      format={"backgroundColor": {"red": 1, "green": 0.75, "blue": 0.2}})
+        elif any('wfh' in x for x in event_summaries):
+            cell_format = CellFormat(range=cell.address,
+                                     format={"backgroundColor": {"red": 0.6, "green": 0.8, "blue": 0.8}})
         else:
             cell_format = CellFormat(range=cell.address, format={"backgroundColor": {"red": 1, "green": 1, "blue": 1}})
         all_cells.append(cell)
