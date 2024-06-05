@@ -168,6 +168,9 @@ def send_to_google_sheet(df_filtered):
         elif any('wfh' in x for x in event_summaries):
             cell_format = CellFormat(range=cell.address,
                                      format={"backgroundColor": {"red": 0.6, "green": 0.8, "blue": 0.8}})
+        elif any('business trip' in x for x in event_summaries):
+            cell_format = CellFormat(range=cell.address,
+                                     format={"backgroundColor": {"red": 1, "green": 1, "blue": 0.4}})
         else:
             cell_format = CellFormat(range=cell.address, format={"backgroundColor": {"red": 1, "green": 1, "blue": 1}})
         all_cells.append(cell)
@@ -235,7 +238,7 @@ def main():
     df = pl.DataFrame(normalised_devices, infer_schema_length=5000)
     windows_devices = pl.col("os").str.contains("Windows")
     mac_devices = pl.col("deviceTypePrediction").str.contains("MacBook") | pl.col("description").str.contains(
-        "MacBook")
+        "MacBook") | pl.col("description").str.contains("64")  # Hardcode LAPTOP-64 for Eugene
     combined_filter = windows_devices | mac_devices
     df_filtered = df.filter(combined_filter)
     df_filtered = df_filtered.unique(subset='description', keep='first')
