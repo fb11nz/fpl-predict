@@ -204,7 +204,7 @@ def send_to_google_sheet(df_filtered):
                         "textFormat": {"foregroundColor": {"red": 0, "green": 1, "blue": 0}}
                     }
                 )
-                cell = Cell(row=row, col=col, value="1")
+                cell = Cell(row=row, col=col, value=1)
             elif public_holiday:
                 cell_format = CellFormat(range=cell.address,
                                          format={"backgroundColor": {"red": 1, "green": 0.8, "blue": 0.6}})
