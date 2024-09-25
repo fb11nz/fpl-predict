@@ -27,24 +27,58 @@ class DeviceInfo:
 
 
 def headers_exist(worksheet, header):
-    existing_headers = worksheet.row_values(1)  # Fetch the first row of the sheet
-    return existing_headers[:len(header)] == header
+    try:
+        existing_headers = worksheet.row_values(1)  # Fetch the first row of the sheet
+        print(f"Headers fetched from worksheet: {existing_headers}")
+    except gspread.exceptions.APIError as e:
+        print(f"API error while fetching headers: {e}")
+        return False
+    except Exception as e:
+        print(f"Unexpected error while fetching headers: {e}")
+        return False
+
+    headers_match = existing_headers[:len(header)] == header
+    print(f"Do headers match expected headers? {headers_match}")
+    return headers_match
 
 
 def employee_device_info_exists(worksheet, data):
-    existing_data = worksheet.get_all_values()[1:]
+    try:
+        existing_data = worksheet.get_all_values()[1:]
+        print(f"Existing data fetched from worksheet: {existing_data[:5]}")  # Print only first 5 rows for brevity
+    except gspread.exceptions.APIError as e:
+        print(f"API error while fetching existing data: {e}")
+        return False
+    except Exception as e:
+        print(f"Unexpected error while fetching existing data: {e}")
+        return False
+
     existing_first_three_columns = [row[:3] for row in existing_data]
+    print(f"First three columns of existing data: {existing_first_three_columns[:5]}")  # Print only first 5 rows
+
     for row in data:
         if row[:3] in existing_first_three_columns:
+            print(f"Match found for data row: {row}")
             return True
+    print("No matching data found.")
     return False
 
 
 def find_person_row(worksheet, name):
-    # Fetch all names from column 1
-    names = worksheet.col_values(1)
+    try:
+        # Fetch all names from column 1
+        names = worksheet.col_values(1)
+        print(f"Names fetched from worksheet: {names[:5]}")  # Print only first 5 names for brevity
+    except gspread.exceptions.APIError as e:
+        print(f"API error while fetching names: {e}")
+        return None
+    except Exception as e:
+        print(f"Unexpected error while fetching names: {e}")
+        return None
+
     try:
         row_idx = names.index(name) + 1
+        print(f"Found {name} at row {row_idx}")
         return row_idx
     except ValueError:
         # If the employee is not found on the sheet
@@ -69,30 +103,68 @@ def filter_event_summaries_by_name(events: list[dict], name: str) -> list[str]:
 
 
 def send_to_google_sheet(df_filtered):
-    events_today = shared_calendar.get_calendar_events_for_today()
+    try:
+        events_today = shared_calendar.get_calendar_events_for_today()
+    except Exception as e:
+        print(f"Error fetching calendar events: {e}")
+        return
+
     # Authentication
-    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(FILE_DIR / 'Employee status ZzShoe demo.json', scope)
-    client = gspread.authorize(credentials)
+    try:
+        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        credentials = ServiceAccountCredentials.from_json_keyfile_name(FILE_DIR / 'Employee status ZzShoe demo.json', scope)
+        client = gspread.authorize(credentials)
+    except Exception as e:
+        print(f"Error authorizing Google Sheets client: {e}")
+        return
 
     # Open the Google Sheet
+    try:
+        sheet = client.open_by_key('1RrY0qPg9hI747OE7oAZIbIrGvc6GBduSdFTZ_KwKYV4')
+    except gspread.exceptions.SpreadsheetNotFound:
+        print("Spreadsheet not found.")
+        return
+    except gspread.exceptions.APIError as e:
+        print(f"API error while opening the sheet: {e}")
+        return
 
-    # Get the current month name
-    today = datetime.date.today()
-    month_name = today.strftime("%B")
-    year_name = today.strftime("%Y")
-    sheet_name = f'{year_name} {month_name}'
+    try:
+        person_device_sheet = sheet.worksheet("PersonDeviceLookup")
+        person_lookup_data = {}
+        for row in person_device_sheet.get_all_values()[1:]:
+            row = row[:3]
+            person_lookup_data[row[1]] = {
+                'name': row[0],
+                'primary_device': row[1],
+                'secondary_device': row[2] if len(row) > 2 else None
+            }
+            if len(row) > 2 and row[2]:
+                person_lookup_data[row[2]] = {
+                    'name': row[0],
+                    'primary_device': row[1],
+                    'secondary_device': row[2]
+                }
+    except gspread.exceptions.WorksheetNotFound:
+        print("PersonDeviceLookup worksheet not found.")
+        return
+    except gspread.exceptions.APIError as e:
+        print(f"API error while accessing PersonDeviceLookup worksheet: {e}")
+        return
 
-    # Open the sheet or create it if it doesn't exist
-    sheet = client.open_by_key('1RrY0qPg9hI747OE7oAZIbIrGvc6GBduSdFTZ_KwKYV4')
-    person_device_sheet = sheet.worksheet("PersonDeviceLookup")
-    person_lookup_data = {}
-    for row in person_device_sheet.get_all_values()[1:]:
-        person_lookup_data[row[1]] = {
-            'name': row[0],
-            'primary_device': row[1],
-            'secondary_device': row[2] if len(row) > 2 else None
-        }
+    # Create or open the target sheet for the current month
+    try:
+        today = datetime.date.today()
+        month_name = today.strftime("%B")
+        year_name = today.strftime("%Y")
+        sheet_name = f'{year_name} {month_name}'
+
+        try:
+            worksheet = sheet.worksheet(sheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = sheet.add_worksheet(title=sheet_name, rows=100, cols=32)
+    except gspread.exceptions.APIError as e:
+        print(f"API error while handling the worksheet: {e}")
+        return
 
     device_name_idx = df_filtered.columns.index("description")
     in_office_idx = df_filtered.columns.index("inOffice")
@@ -132,11 +204,6 @@ def send_to_google_sheet(df_filtered):
                     InOffice='Offline'
                 )
             )
-
-    try:
-        worksheet = sheet.worksheet(sheet_name)
-    except gspread.exceptions.WorksheetNotFound:
-        worksheet = sheet.add_worksheet(title=sheet_name, rows=100, cols=32)
 
     all_cells = []
     all_cell_formats = []
@@ -187,6 +254,9 @@ def send_to_google_sheet(df_filtered):
         row = find_person_row(worksheet, person_name)
 
         if row:
+            # If cell is already in all_cells, don't add it again
+            if any(cell.row == row and cell.col == col for cell in all_cells):
+                continue
             cell = Cell(row=row, col=col, value="")
             all_cells.append(cell)
 
@@ -224,8 +294,19 @@ def send_to_google_sheet(df_filtered):
                 cell_format = CellFormat(range=cell.address, format={"backgroundColor": {"red": 1, "green": 1, "blue": 1}})
             all_cells.append(cell)
             all_cell_formats.append(cell_format)
-    worksheet.update_cells(all_cells)
-    worksheet.batch_format(all_cell_formats)
+    try:
+        worksheet.update_cells(all_cells)
+    except gspread.exceptions.APIError as e:
+        print(f"API error while updating cells: {e}")
+        return
+
+    try:
+        worksheet.batch_format(all_cell_formats)
+    except gspread.exceptions.APIError as e:
+        print(f"API error while formatting cells: {e}")
+        return
+
+    print("Google Sheet updated successfully.")
 
     # Calculate for current status
     current_status_sheet = sheet.worksheet("CurrentStatus")
@@ -332,7 +413,7 @@ def main():
     normalised_devices = [{key: device.get(key) for key in all_keys} for device in devices]
 
     df = pl.DataFrame(normalised_devices, infer_schema_length=5000)
-    windows_devices = pl.col("os").str.contains("Windows")
+    windows_devices = pl.col("os").str.contains("Windows") | pl.col("manufacturer").str.contains("Dell")
     mac_devices = pl.col("deviceTypePrediction").str.contains("MacBook") | pl.col("description").str.contains(
         "MacBook") | pl.col("description").str.contains("64")  # Hardcode LAPTOP-64 for Eugene
     combined_filter = windows_devices | mac_devices
