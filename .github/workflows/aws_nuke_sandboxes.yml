@@ -64,9 +64,7 @@ jobs:
       - name: Install cloud-nuke
         env:
           HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
-        run: |
-          brew tap gruntwork-io/cloud-nuke
-          brew install cloud-nuke
+        run: brew install cloud-nuke
 
       # Configure AWS credentials
       - name: Configure AWS credentials
