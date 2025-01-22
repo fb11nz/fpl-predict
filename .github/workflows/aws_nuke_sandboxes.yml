@@ -18,22 +18,17 @@ jobs:
       matrix:
         aws-account:
           - name: niau-sandbox
-            role: NIAU_SANDBOX_ROLE
+            role: arn:aws:iam::054037101480:role/OIDC-CloudNuke
           - name: zozocosme-sandbox
-            role: ZOZOCOSME_SANDBOX_ROLE
+            role: arn:aws:iam:205930623238:role/OIDC-CloudNuke
           - name: zozofit-sandbox
-            role: ZOZOFIT_SANDBOX_ROLE
+            role: arn:aws:iam:911167926524:role/OIDC-CloudNuke
           - name: zozomat-sandbox
-            role: ZOZOMAT_SANDBOX_ROLE
+            role: arn:aws:iam:605134455195:role/OIDC-CloudNuke
           - name: zozometry-sandbox
-            role: ZOZOMETRY_SANDBOX_ROLE
+            role: arn:aws:iam:761018869138:role/OIDC-CloudNuke
     env:
       HOMEBREW_CURLRC: 1
-      NIAU_SANDBOX_ROLE: arn:aws:iam::${{ secrets.AWS_NIAU_SANDBOX_ACCOUNT }}:role/${{ secrets.AWS_SANDBOX_OIDC_ROLE }}
-      ZOZOCOSME_SANDBOX_ROLE: arn:aws:iam::${{ secrets.AWS_ZOZOCOSME_SANDBOX_ACCOUNT }}:role/${{ secrets.AWS_SANDBOX_OIDC_ROLE }}
-      ZOZOFIT_SANDBOX_ROLE: arn:aws:iam::${{ secrets.AWS_ZOZOFIT_SANDBOX_ACCOUNT }}:role/${{ secrets.AWS_SANDBOX_OIDC_ROLE }}
-      ZOZOMAT_SANDBOX_ROLE: arn:aws:iam::${{ secrets.AWS_ZOZOMAT_SANDBOX_ACCOUNT }}:role/${{ secrets.AWS_SANDBOX_OIDC_ROLE }}
-      ZOZOMETRY_SANDBOX_ROLE: arn:aws:iam::${{ secrets.AWS_ZOZOMETRY_SANDBOX_ACCOUNT }}:role/${{ secrets.AWS_SANDBOX_OIDC_ROLE }}
     steps:
       - name: Install dependencies
         run: |
@@ -71,7 +66,7 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ env[matrix.role] }}
+          role-to-assume: ${{ matrix.aws-account.role }}
           aws-region: ap-southeast-2
 
       # Run cloud-nuke
