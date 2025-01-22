@@ -20,13 +20,13 @@ jobs:
           - name: niau-sandbox
             role: arn:aws:iam::054037101480:role/OIDC-CloudNuke
           - name: zozocosme-sandbox
-            role: arn:aws:iam:205930623238:role/OIDC-CloudNuke
+            role: arn:aws:iam::205930623238:role/OIDC-CloudNuke
           - name: zozofit-sandbox
-            role: arn:aws:iam:911167926524:role/OIDC-CloudNuke
+            role: arn:aws:iam::911167926524:role/OIDC-CloudNuke
           - name: zozomat-sandbox
-            role: arn:aws:iam:605134455195:role/OIDC-CloudNuke
+            role: arn:aws:iam::605134455195:role/OIDC-CloudNuke
           - name: zozometry-sandbox
-            role: arn:aws:iam:761018869138:role/OIDC-CloudNuke
+            role: arn:aws:iam::761018869138:role/OIDC-CloudNuke
     env:
       HOMEBREW_CURLRC: 1
     steps:
