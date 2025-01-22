@@ -38,13 +38,15 @@ jobs:
       - name: Install Homebrew
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential curl file git gcc
+          sudo apt-get install -y build-essential curl file git
           /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-          echo >> /home/runner/.bashrc
-          echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> /home/runner/.bashrc
-          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
-
-      # Install cloud-nuke
+      
+          # Put Homebrew on PATH for *subsequent* steps:
+          echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> $GITHUB_ENV
+      
+      - name: Initialize Homebrew in this shell
+        run: eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+      
       - name: Install cloud-nuke
         run: |
           brew tap gruntwork-io/cloud-nuke
