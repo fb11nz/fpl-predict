@@ -7,6 +7,9 @@ on:
     # Runs at 00:00 UTC daily
     - cron: '0 0 * * *'
 
+permissions:
+  contents: read
+
 jobs:
   cloud-nuke:
     runs-on: ubuntu-latest
