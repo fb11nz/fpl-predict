@@ -1,0 +1,72 @@
+name: Cloud-Nuke Daily Cleanup
+
+on:
+  workflow_dispatch:
+  pull_request:
+  schedule:
+    # Runs at 00:00 UTC daily
+    - cron: '0 0 * * *'
+
+jobs:
+  cloud-nuke:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        aws-account:
+          - name: niau-sandbox
+            role: NIAU_SANDBOX_ROLE
+          - name: zozocosme-sandbox
+            role: ZOZOCOSME_SANDBOX_ROLE
+          - name: zozofit-sandbox
+            role: ZOZOFIT_SANDBOX_ROLE
+          - name: zozomat-sandbox
+            role: ZOZOMAT_SANDBOX_ROLE
+          - name: zozometry-sandbox
+            role: ZOZOMETRY_SANDBOX_ROLE
+    env:
+      NIAU_SANDBOX_ROLE: arn:aws:iam::${{ secrets.AWS_NIAU_SANDBOX_ACCOUNT }}:role/${{ secrets.AWS_SANDBOX_OIDC_ROLE }}
+      ZOZOCOSME_SANDBOX_ROLE: arn:aws:iam::${{ secrets.AWS_ZOZOCOSME_SANDBOX_ACCOUNT }}:role/${{ secrets.AWS_SANDBOX_OIDC_ROLE }}
+      ZOZOFIT_SANDBOX_ROLE: arn:aws:iam::${{ secrets.AWS_ZOZOFIT_SANDBOX_ACCOUNT }}:role/${{ secrets.AWS_SANDBOX_OIDC_ROLE }}
+      ZOZOMAT_SANDBOX_ROLE: arn:aws:iam::${{ secrets.AWS_ZOZOMAT_SANDBOX_ACCOUNT }}:role/${{ secrets.AWS_SANDBOX_OIDC_ROLE }}
+      ZOZOMETRY_SANDBOX_ROLE: arn:aws:iam::${{ secrets.AWS_ZOZOMETRY_SANDBOX_ACCOUNT }}:role/${{ secrets.AWS_SANDBOX_OIDC_ROLE }}
+    steps:
+      # Checkout the repository (optional if required for other tasks)
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Install Homebrew
+      - name: Install Homebrew
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl file git
+          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> ~/.bashrc
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+
+      # Install cloud-nuke
+      - name: Install cloud-nuke
+        run: |
+          brew tap gruntwork-io/cloud-nuke
+          brew install cloud-nuke
+
+      # Configure AWS credentials
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env[matrix.role] }}
+          aws-region: ap-southeast-2
+
+      # Run cloud-nuke
+      - name: Run cloud-nuke
+        run: |
+          cloud-nuke aws \
+            --dry-run \
+            --exclude-resource-type cloudwatch-loggroup \
+            --exclude-resource-type cloudtrail \
+            --exclude-resource-type config-recorders \
+            --exclude-resource-type config-rules \
+            --exclude-resource-type guardduty \
+            --exclude-resource-type iam-role \
+            --exclude-resource-type macie-member \
+            --exclude-resource-type oidcprovider \
+            --exclude-resource-type security-hub
