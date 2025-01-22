@@ -43,6 +43,7 @@ jobs:
           echo >> /home/runner/.bashrc
           echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> /home/runner/.bashrc
           eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          export HOMEBREW_GITHUB_API_TOKEN="${{ secrets.GITHUB_TOKEN }}"
           brew tap gruntwork-io/cloud-nuke
           brew install cloud-nuke
 
