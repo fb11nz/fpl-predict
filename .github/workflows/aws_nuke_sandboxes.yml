@@ -27,26 +27,44 @@ jobs:
           - name: zozometry-sandbox
             role: ZOZOMETRY_SANDBOX_ROLE
     env:
+      HOMEBREW_CURLRC: 1
       NIAU_SANDBOX_ROLE: arn:aws:iam::${{ secrets.AWS_NIAU_SANDBOX_ACCOUNT }}:role/${{ secrets.AWS_SANDBOX_OIDC_ROLE }}
       ZOZOCOSME_SANDBOX_ROLE: arn:aws:iam::${{ secrets.AWS_ZOZOCOSME_SANDBOX_ACCOUNT }}:role/${{ secrets.AWS_SANDBOX_OIDC_ROLE }}
       ZOZOFIT_SANDBOX_ROLE: arn:aws:iam::${{ secrets.AWS_ZOZOFIT_SANDBOX_ACCOUNT }}:role/${{ secrets.AWS_SANDBOX_OIDC_ROLE }}
       ZOZOMAT_SANDBOX_ROLE: arn:aws:iam::${{ secrets.AWS_ZOZOMAT_SANDBOX_ACCOUNT }}:role/${{ secrets.AWS_SANDBOX_OIDC_ROLE }}
       ZOZOMETRY_SANDBOX_ROLE: arn:aws:iam::${{ secrets.AWS_ZOZOMETRY_SANDBOX_ACCOUNT }}:role/${{ secrets.AWS_SANDBOX_OIDC_ROLE }}
     steps:
-      # Checkout the repository (optional if required for other tasks)
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # Install Homebrew
-      - name: Install Homebrew and cloud-nuke
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential curl file git gcc
-          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-          echo >> /home/runner/.bashrc
-          echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> /home/runner/.bashrc
-          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
-          export HOMEBREW_GITHUB_API_TOKEN=${{ github.token }}
+
+      - name: Install SSH key
+        uses: shimataro/ssh-key-action@v2
+        with:
+          key: ${{ secrets.SSH_KEY }}
+          name: id_rsa # optional
+          known_hosts: ${{ secrets.KNOWN_HOSTS }}
+
+      - name: Setup CURLRC
+        run: echo "--netrc-optional" >> ~/.curlrc
+
+      - name: Setup NETRC for Artifactory
+        run: echo "${{ secrets.ZOZONZ_ARTIFACTORY_NETRC }}" >> ~/.netrc
+
+      - name: Setup NETRC for GitHub
+        run: echo "${{ secrets.ZOZONZ_GITHUB_NETRC }}" >> ~/.netrc
+
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@master
+
+      - name: Set up git
+        uses: Homebrew/actions/git-user-config@master
+
+      - name: Install cloud-nuke
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+        run: |
           brew tap gruntwork-io/cloud-nuke
           brew install cloud-nuke
 
