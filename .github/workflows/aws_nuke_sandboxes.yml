@@ -38,9 +38,10 @@ jobs:
       - name: Install Homebrew
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential curl file git
+          sudo apt-get install -y build-essential curl file git gcc
           /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-          echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> ~/.bashrc
+          echo >> /home/runner/.bashrc
+          echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> /home/runner/.bashrc
           eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
 
       # Install cloud-nuke
