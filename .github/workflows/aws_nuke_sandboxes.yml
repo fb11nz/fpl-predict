@@ -84,3 +84,4 @@ jobs:
             --exclude-resource-type macie-member \
             --exclude-resource-type oidcprovider \
             --exclude-resource-type security-hub
+            --force
