@@ -75,6 +75,7 @@ jobs:
           cloud-nuke aws \
             --dry-run \
             --older-than 1h \
+            --region ap-southeast-2 \
             --exclude-resource-type cloudwatch-loggroup \
             --exclude-resource-type cloudtrail \
             --exclude-resource-type config-recorders \
