@@ -74,6 +74,7 @@ jobs:
         run: |
           cloud-nuke aws \
             --dry-run \
+            --older-than 1h \
             --exclude-resource-type cloudwatch-loggroup \
             --exclude-resource-type cloudtrail \
             --exclude-resource-type config-recorders \
