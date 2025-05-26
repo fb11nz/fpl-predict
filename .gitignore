@@ -1,0 +1,5 @@
+.venv/
+venv/
+.python-version
+.idea/
+employee-status/Employee status ZzShoe demo.json
