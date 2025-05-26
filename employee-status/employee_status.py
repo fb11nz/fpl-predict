@@ -415,7 +415,7 @@ def main():
     df = pl.DataFrame(normalised_devices, infer_schema_length=5000)
     windows_devices = pl.col("os").str.contains("Windows") | pl.col("manufacturer").str.contains("Dell")
     mac_devices = pl.col("deviceTypePrediction").str.contains("MacBook") | pl.col("description").str.contains(
-        "MacBook") | pl.col("description").str.contains("64")  # Hardcode LAPTOP-64 for Eugene
+        "MacBook") | pl.col("os").str.contains("Mac OS X 10.15")
     combined_filter = windows_devices | mac_devices
     df_filtered = df.filter(combined_filter)
     df_filtered = df_filtered.unique(subset='description', keep='first')
