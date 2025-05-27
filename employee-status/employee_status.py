@@ -366,7 +366,8 @@ def send_to_google_sheet(df_filtered):
     device_name_idx = df_filtered.columns.index("description")
     in_office_idx = df_filtered.columns.index("inOffice")
     all_devices = [x.DeviceName for x in devices_info]
-    devices = sorted(all_devices)
+    all_devices_cleaned = [x for x in all_devices if x is not None]
+    devices = sorted(all_devices_cleaned)
     for i, df_row in enumerate(df_filtered.iter_rows()):
         device_name = df_row[device_name_idx]
         row = devices.index(device_name) + 2
@@ -419,6 +420,7 @@ def main():
     combined_filter = windows_devices | mac_devices
     df_filtered = df.filter(combined_filter)
     df_filtered = df_filtered.unique(subset='description', keep='first')
+    df_filtered = df_filtered.filter(pl.col("description").is_not_null())
     today = datetime.date.today()
     df_filtered = df_filtered.with_columns(
         pl.col('lastSeen').str.strptime(pl.Datetime, "%Y-%m-%dT%H:%M:%SZ").dt.convert_time_zone(
