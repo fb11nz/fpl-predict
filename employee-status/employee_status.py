@@ -414,15 +414,22 @@ def main():
     normalised_devices = [{key: device.get(key) for key in all_keys} for device in devices]
 
     df = pl.DataFrame(normalised_devices, infer_schema_length=5000)
+    df = df.with_columns([
+        pl.col("os").fill_null(""),
+        pl.col("manufacturer").fill_null(""),
+        pl.col("deviceTypePrediction").fill_null(""),
+        pl.col("description").fill_null(""),
+    ])
+
     windows_devices = (
-            pl.col("os").str.contains("Windows").fill_null(False) |
-            pl.col("manufacturer").str.contains("Dell").fill_null(False)
+            pl.col("os").str.contains("Windows") |
+            pl.col("manufacturer").str.contains("Dell")
     )
 
     mac_devices = (
-            pl.col("deviceTypePrediction").str.contains("MacBook").fill_null(False) |
-            pl.col("description").str.contains("MacBook").fill_null(False) |
-            pl.col("os").str.contains("Mac OS X 10.15").fill_null(False)
+            pl.col("deviceTypePrediction").str.contains("MacBook") |
+            pl.col("description").str.contains("MacBook") |
+            pl.col("os").str.contains("Mac OS X 10.15")
     )
 
     combined_filter = windows_devices | mac_devices
