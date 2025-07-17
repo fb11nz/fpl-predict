@@ -29,6 +29,9 @@ jobs:
     env:
       HOMEBREW_CURLRC: 1
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -70,18 +73,4 @@ jobs:
 
       # Run cloud-nuke
       - name: Run cloud-nuke
-        run: |
-          cloud-nuke aws \
-            --older-than 336h \
-            --region ap-southeast-2 \
-            --exclude-resource-type cloudwatch-loggroup \
-            --exclude-resource-type cloudtrail \
-            --exclude-resource-type config-recorders \
-            --exclude-resource-type config-rules \
-            --exclude-resource-type guardduty \
-            --exclude-resource-type iam-role \
-            --exclude-resource-type macie-member \
-            --exclude-resource-type oidcprovider \
-            --exclude-resource-type security-hub \
-            --exclude-resource-type route53-hosted-zone \
-            --force
+        run: cloud-nuke aws --older-than 336h --region ap-southeast-2 --region global --config cloud-nuke.yml --force
