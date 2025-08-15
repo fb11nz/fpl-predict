@@ -1,0 +1,51 @@
+# Environment
+.env
+.venv/
+venv/
+ENV/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+.python-version
+
+# Data files
+data/processed/*
+*.parquet
+*.csv
+*.json
+!.env.example
+*.arrow
+*.feather
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.claude/
+/docs
+
+# Model files
+/models
+*.pkl
+*.joblib
+
+# Reports
+reports/
+
+# Cache
+.cache/

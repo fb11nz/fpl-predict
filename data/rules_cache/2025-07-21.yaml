@@ -1,0 +1,27 @@
+minutes:
+  1-59: 1
+  60+: 2
+goals:
+  GKP: 6
+  DEF: 6
+  MID: 5
+  FWD: 4
+assist: 3
+clean_sheet:
+  GKP: 4
+  DEF: 4
+  MID: 1
+saves_per_3: 1
+penalty_save: 5
+penalty_miss: -2
+goals_conceded_per_2:
+  GKP_DEF: -1
+yellow_card: -1
+red_card: -3
+own_goal: -2
+bonus: [1,2,3]
+defensive_contribution:
+  points: 2
+  defender_threshold_cbit: 10
+  mid_fwd_threshold_cbirt: 12
+  capped_per_match: true
