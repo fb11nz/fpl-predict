@@ -344,7 +344,7 @@ ALLOW_ODDS_FALLBACK=true         # Use odds data if available
 
 ### Optimizer Issues
 - Ensure models trained successfully first
-- Check bench budget is reasonable (15-20 = £1.5-2.0m)
+- Check bench budget is reasonable (150-200 = £15-20m)
 - Verify no impossible constraints (e.g., excluding too many players)
 
 ## License
