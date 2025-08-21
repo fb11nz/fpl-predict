@@ -36,17 +36,21 @@ class Settings(BaseSettings):
     def seasons_window(self) -> tuple[int, int]:
         """
         Returns (start, end) seasons. If not provided in .env,
-        default to a safe two-season window ending in the current season.
+        default to a safe three-season window ending in the current season.
         """
         if self.FD_START_SEASON and self.FD_END_SEASON:
             return int(self.FD_START_SEASON), int(self.FD_END_SEASON)
 
         today = _dt.date.today()
         # If after July, current season starts this year; else last year.
-        start_guess = today.year if today.month >= 7 else today.year - 1
-        # Use two-season window by default (start-1 .. start)
-        start = (self.FD_START_SEASON or (start_guess - 1))
-        end = (self.FD_END_SEASON or start_guess)
+        # For August 2025, this gives us 2025 as current season
+        current_season_start = today.year if today.month >= 7 else today.year - 1
+        
+        # Use three-season window by default (current-2 .. current-1)
+        # This gives us 2023, 2024 for historical data
+        # Current 2025-26 season data is fetched separately from FPL API
+        start = (self.FD_START_SEASON or (current_season_start - 2))
+        end = (self.FD_END_SEASON or (current_season_start - 1))
         return int(start), int(end)
 
 settings = Settings()

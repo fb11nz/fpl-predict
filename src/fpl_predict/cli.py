@@ -147,20 +147,66 @@ def transfers_group() -> None:
               help="Planning horizon in gameweeks")
 @click.option("--consider-hits/--no-hits", default=False, show_default=True,
               help="Consider taking a -4 hit for 2 transfers")
-def transfers_recommend(entry: int | None, max_transfers: int, horizon: int, consider_hits: bool) -> None:
+@click.option("--no-banking", is_flag=True, default=False,
+              help="Disable banking strategy evaluation")
+def transfers_recommend(entry: int | None, max_transfers: int, horizon: int, consider_hits: bool, no_banking: bool) -> None:
     """Recommend transfers for your existing team."""
-    from .transfer.recommend import recommend_weekly_transfers, format_recommendation_output
+    from .transfer.recommend import recommend_weekly_transfers
     
     try:
         recommendation = recommend_weekly_transfers(
             max_transfers=max_transfers,
             planning_horizon=horizon,
             consider_hits=consider_hits,
-            entry_id=entry
+            entry_id=entry,
+            evaluate_banking=not no_banking  # Enable banking by default
         )
         
-        output = format_recommendation_output(recommendation)
-        click.echo(output)
+        # Use the human_readable output if available, otherwise fall back to old format
+        if "human_readable" in recommendation and recommendation["human_readable"]:
+            click.echo(recommendation["human_readable"])
+            
+            # Add banking comparison if available
+            if "banking_analysis" in recommendation and recommendation["banking_analysis"]:
+                ba = recommendation["banking_analysis"]
+                current_ft = ba.get('current_free_transfers', 1)
+                next_ft = ba.get('next_week_free_transfers', 2)
+                
+                click.echo("\n" + "=" * 60)
+                click.echo("BANKING STRATEGY COMPARISON")
+                click.echo("=" * 60)
+                
+                # Handle both old and new comparison keys for backwards compatibility
+                best_now = ba['comparison'].get('best_now', ba['comparison'].get('one_transfer_now', 0))
+                bank_for_next = ba['comparison'].get('bank_for_next', ba['comparison'].get('bank_for_two', 0))
+                
+                click.echo(f"Best option with {current_ft} FT now: {best_now:.2f} EP gain")
+                click.echo(f"Banking for {next_ft} FT next week: {bank_for_next:.2f} EP gain")
+                
+                # Handle both old and new change formats
+                changes = ba.get('banked_changes', ba.get('two_transfer_changes', []))
+                if changes:
+                    click.echo(f"\nBest {next_ft}-transfer option if banking:")
+                    for change in changes:
+                        click.echo(f"  {change['out_name']} -> {change['in_name']}")
+                
+                if ba.get('overlapping_transfer'):
+                    click.echo("\n⚠️  Note: The best transfer is part of the banked combination")
+                    click.echo("   You can make it now and still do additional transfers next week")
+                
+                click.echo(f"\nBanking advantage: {ba['comparison']['banking_advantage']:+.2f} EP")
+                
+                if ba['comparison']['banking_advantage'] > 0:
+                    click.echo(f"\n✓ Recommendation: Bank your transfer for {next_ft} FT next week")
+                else:
+                    click.echo(f"\n✓ Recommendation: Use your {current_ft} FT now")
+                    if ba.get('overlapping_transfer'):
+                        click.echo("   You'll get the benefit immediately and maintain flexibility")
+        else:
+            # Fall back to old format
+            from .transfer.recommend import format_recommendation_output
+            output = format_recommendation_output(recommendation)
+            click.echo(output)
         
     except FileNotFoundError as e:
         click.echo(f"Error: {e}")

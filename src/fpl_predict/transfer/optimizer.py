@@ -63,6 +63,7 @@ class Player:
     is_differential: bool = False
     injury_risk: float = 0.0
     rotation_risk: float = 0.0
+    team_strength: float = 1.0  # Team quality multiplier
 
 
 # ------------------- data loaders -------------------
@@ -702,6 +703,512 @@ def _format_advanced_result(result: Dict[str, Any], horizon: int, bench_budget: 
     }
 
 
+# ------------------- Two-Stage Transfer Optimization -------------------
+def evaluate_transfer_with_optimal_xi(
+    current_squad: List[int],
+    transfer_out_id: int,
+    transfer_in_id: int,
+    players: List[Player],
+    horizon: int,
+    bench_weight: float
+) -> float:
+    """
+    Evaluate a single transfer by optimizing XI selection after the transfer.
+    Returns the total objective value after the transfer.
+    """
+    # Create new squad after transfer
+    new_squad_ids = [pid if pid != transfer_out_id else transfer_in_id for pid in current_squad]
+    
+    # Get squad players
+    squad_players = [p for p in players if p.id in new_squad_ids]
+    
+    # Create LP for XI selection with this squad
+    prob = pulp.LpProblem("XI_Selection", pulp.LpMaximize)
+    
+    # Variables: who is in XI
+    xi_vars = {p.id: pulp.LpVariable(f"xi_{p.id}", cat="Binary") for p in squad_players}
+    
+    # Objective: maximize EP (XI gets full, bench gets bench_weight)
+    prob += pulp.lpSum([
+        xi_vars[p.id] * p.eph + (1 - xi_vars[p.id]) * p.eph * bench_weight
+        for p in squad_players
+    ])
+    
+    # Exactly 11 in XI
+    prob += pulp.lpSum(xi_vars.values()) == 11
+    
+    # Formation constraints - at least satisfy minimum requirements
+    prob += pulp.lpSum([xi_vars[p.id] for p in squad_players if p.pos == "GKP"]) == 1
+    prob += pulp.lpSum([xi_vars[p.id] for p in squad_players if p.pos == "DEF"]) >= 3
+    prob += pulp.lpSum([xi_vars[p.id] for p in squad_players if p.pos == "DEF"]) <= 5
+    prob += pulp.lpSum([xi_vars[p.id] for p in squad_players if p.pos == "MID"]) >= 2
+    prob += pulp.lpSum([xi_vars[p.id] for p in squad_players if p.pos == "MID"]) <= 5
+    prob += pulp.lpSum([xi_vars[p.id] for p in squad_players if p.pos == "FWD"]) >= 1
+    prob += pulp.lpSum([xi_vars[p.id] for p in squad_players if p.pos == "FWD"]) <= 3
+    
+    # Solve
+    prob.solve(pulp.PULP_CBC_CMD(msg=0))
+    
+    if prob.status == pulp.LpStatusOptimal:
+        return pulp.value(prob.objective)
+    else:
+        return -float('inf')  # Invalid solution
+
+
+def optimize_transfers_two_stage(
+    current_squad: List[int],
+    players: List[Player],
+    max_transfers: int,
+    horizon: int,
+    bench_weight: float,
+    budget_limit: int
+) -> Dict[str, Any]:
+    """
+    Two-stage transfer optimization:
+    1. Enumerate all valid transfer combinations
+    2. For each, optimize XI and calculate total objective
+    3. Select the best transfer combination
+    """
+    log.info(f"Starting two-stage transfer optimization for {max_transfers} transfer(s)")
+    
+    # Get current squad players
+    current_players = [p for p in players if p.id in current_squad]
+    
+    # Calculate current budget (selling prices)
+    import json
+    import os
+    selling_prices = {}
+    myteam_file = "data/processed/myteam_latest.json"
+    if os.path.exists(myteam_file):
+        with open(myteam_file) as f:
+            myteam_data = json.load(f)
+        for pick in myteam_data.get("picks", []):
+            selling_prices[pick["element"]] = pick.get("selling_price", pick.get("purchase_price", 0))
+    
+    # Group players by position for valid transfers
+    players_by_pos = {"GKP": [], "DEF": [], "MID": [], "FWD": []}
+    for p in players:
+        if p.id not in current_squad:  # Only consider players not in squad
+            players_by_pos[p.pos].append(p)
+    
+    # Sort by EP to prioritize better players
+    for pos in players_by_pos:
+        players_by_pos[pos].sort(key=lambda p: p.eph, reverse=True)
+    
+    # Generate transfer options based on max_transfers
+    transfer_options = []
+    
+    if max_transfers == 1:
+        # Generate single transfer options
+        for p_out in current_players:
+            selling_price = selling_prices.get(p_out.id, p_out.cost)
+            
+            # Only consider top N candidates per position to reduce computation
+            candidates = players_by_pos[p_out.pos][:20]  # Top 20 by EP
+            
+            for p_in in candidates:
+                # Check budget constraint
+                if p_in.cost > selling_price:
+                    continue  # Can't afford
+                
+                # Check club constraint (max 3 per team)
+                new_squad_ids = [pid if pid != p_out.id else p_in.id for pid in current_squad]
+                team_counts = {}
+                for pid in new_squad_ids:
+                    p = next((pl for pl in players if pl.id == pid), None)
+                    if p:
+                        team_counts[p.team] = team_counts.get(p.team, 0) + 1
+                
+                if team_counts.get(p_in.team, 0) > 3:
+                    continue  # Would exceed club limit
+                
+                # Calculate EP gain (simple heuristic for initial filtering)
+                ep_gain = p_in.eph - p_out.eph
+                
+                transfer_options.append({
+                    'transfers': [(p_out, p_in)],
+                    'ep_gain': ep_gain,
+                    'budget_saved': selling_price - p_in.cost
+                })
+        
+        # Sort by EP gain and take top candidates
+        transfer_options.sort(key=lambda x: x['ep_gain'], reverse=True)
+        transfer_options = transfer_options[:50]  # Evaluate top 50 single transfers
+        
+    elif max_transfers == 2:
+        # Generate double transfer options
+        # This allows for downgrade/upgrade combinations
+        
+        # First, generate promising single transfers
+        single_transfers = []
+        for p_out in current_players:
+            # p_out is a Player object, and selling_prices keys are player IDs
+            selling_price = selling_prices.get(p_out.id, p_out.cost)
+            # For 2-transfers, include both upgrades AND downgrades
+            # Sort by EP but also include some cheaper players for downgrade options
+            all_candidates = players_by_pos[p_out.pos]
+            
+            # Take top players by EP
+            top_by_ep = all_candidates[:25]
+            
+            # Also specifically include good cheaper options for downgrades
+            # These help fund upgrades elsewhere
+            cheaper = [p for p in all_candidates if p.cost < selling_price]
+            cheaper.sort(key=lambda p: p.eph, reverse=True)
+            
+            # Include some premium options too (for premium downgrades like Salah->Palmer)
+            premium_downgrades = [p for p in all_candidates 
+                                 if selling_price > 100 and  # If selling premium (>£10m)
+                                 p.cost < selling_price and  # Cheaper option
+                                 p.cost > selling_price - 50]  # But not too cheap (within £5m)
+            premium_downgrades.sort(key=lambda p: p.eph, reverse=True)
+            
+            # Combine all sets (avoid duplicates by ID)
+            seen_ids = set()
+            candidates = []
+            for p in top_by_ep + cheaper[:15] + premium_downgrades[:10]:
+                if p.id not in seen_ids:
+                    candidates.append(p)
+                    seen_ids.add(p.id)
+            
+            for p_in in candidates:
+                # Skip if same player
+                if p_in.id == p_out.id:
+                    continue
+                    
+                # For 2-transfer combos, be more flexible with individual costs
+                # since one transfer can fund another
+                if p_in.cost > selling_price + 50:  # Allow up to £5m more expensive with savings elsewhere
+                    continue
+                    
+                ep_gain = p_in.eph - p_out.eph
+                budget_diff = selling_price - p_in.cost
+                single_transfers.append({
+                    'out': p_out,
+                    'in': p_in,
+                    'ep_gain': ep_gain,
+                    'budget_diff': budget_diff
+                })
+        
+        # Sort single transfers by EP gain
+        single_transfers.sort(key=lambda x: x['ep_gain'], reverse=True)
+        
+        log.info(f"Generated {len(single_transfers)} single transfer options for pairing")
+        
+        # Debug: Show a few top single transfers
+        if single_transfers:
+            log.info(f"Top single transfer: {single_transfers[0]['out'].name} -> {single_transfers[0]['in'].name}, EP gain: {single_transfers[0]['ep_gain']:.2f}")
+        
+        # Separate downgrades and upgrades for better pairing
+        downgrades = [t for t in single_transfers if t['budget_diff'] > 0]  # Saves money
+        upgrades = [t for t in single_transfers if t['budget_diff'] < 0]  # Costs money
+        neutral = [t for t in single_transfers if t['budget_diff'] == 0]  # Same price
+        
+        # Sort by their value (EP gain per pound saved/spent)
+        downgrades.sort(key=lambda x: x['ep_gain'] / max(x['budget_diff'], 1), reverse=True)
+        upgrades.sort(key=lambda x: x['ep_gain'] / max(-x['budget_diff'], 1), reverse=True)
+        
+        log.info(f"Found {len(downgrades)} downgrades, {len(upgrades)} upgrades, {len(neutral)} neutral")
+        
+        # Generate double transfer combinations
+        combinations_tried = 0
+        combinations_valid = 0
+        budget_fails = 0
+        club_fails = 0
+        remove_fails = 0
+        
+        # Try pairing each downgrade with each upgrade
+        for t1 in downgrades[:20]:  # Top 20 downgrades
+            for t2 in upgrades[:20]:  # Top 20 upgrades
+                    
+                combinations_tried += 1
+                    
+                # Skip if same player involved
+                if t1['out'].id == t2['out'].id or t1['in'].id == t2['in'].id:
+                    continue
+                if t1['out'].id == t2['in'].id or t1['in'].id == t2['out'].id:
+                    continue
+                    
+                # Check combined budget
+                # Get the actual selling prices from our myteam data
+                # t1['out'] and t2['out'] are Player objects, and their selling prices are in selling_prices dict
+                selling_price_1 = selling_prices.get(t1['out'].id, t1['out'].cost)
+                selling_price_2 = selling_prices.get(t2['out'].id, t2['out'].cost)
+                total_out = selling_price_1 + selling_price_2
+                total_in = t1['in'].cost + t2['in'].cost
+                
+                # Debug first few combinations
+                if combinations_tried <= 5:
+                    log.info(f"Combo {combinations_tried}: {t1['out'].name}->{t1['in'].name} + {t2['out'].name}->{t2['in'].name}")
+                    log.info(f"  Budget: Out £{total_out/10:.1f}m, In £{total_in/10:.1f}m, Valid: {total_in <= total_out}")
+                
+                # Allow the transfer if we can afford it with our budget
+                # (selling both players gives us their combined value to spend)
+                if total_in > total_out:
+                    budget_fails += 1
+                    continue  # Can't afford both
+                
+                # Check club constraints
+                new_squad_ids = current_squad.copy()
+                try:
+                    new_squad_ids.remove(t1['out'].id)
+                    new_squad_ids.remove(t2['out'].id)
+                except ValueError:
+                    # One of the players not in squad - shouldn't happen but skip
+                    remove_fails += 1
+                    continue
+                new_squad_ids.append(t1['in'].id)
+                new_squad_ids.append(t2['in'].id)
+                
+                team_counts = {}
+                for pid in new_squad_ids:
+                    p = next((pl for pl in players if pl.id == pid), None)
+                    if p:
+                        team_counts[p.team] = team_counts.get(p.team, 0) + 1
+                
+                if any(count > 3 for count in team_counts.values()):
+                    club_fails += 1
+                    continue  # Would exceed club limit
+                
+                # Calculate combined EP gain
+                combined_ep_gain = t1['ep_gain'] + t2['ep_gain']
+                
+                transfer_options.append({
+                    'transfers': [(t1['out'], t1['in']), (t2['out'], t2['in'])],
+                    'ep_gain': combined_ep_gain,
+                    'budget_saved': total_out - total_in
+                })
+                combinations_valid += 1
+        
+        # Also try neutral transfers with others
+        for t1 in neutral[:10]:
+            for t2 in single_transfers[:20]:
+                if t1['out'].id == t2['out'].id or t1['in'].id == t2['in'].id:
+                    continue
+                if t1['out'].id == t2['in'].id or t1['in'].id == t2['out'].id:
+                    continue
+                    
+                combinations_tried += 1
+                
+                selling_price_1 = selling_prices.get(t1['out'].id, t1['out'].cost)
+                selling_price_2 = selling_prices.get(t2['out'].id, t2['out'].cost)
+                total_out = selling_price_1 + selling_price_2
+                total_in = t1['in'].cost + t2['in'].cost
+                
+                if total_in > total_out:
+                    budget_fails += 1
+                    continue
+                
+                # Check club constraints
+                new_squad_ids = current_squad.copy()
+                try:
+                    new_squad_ids.remove(t1['out'].id)
+                    new_squad_ids.remove(t2['out'].id)
+                except ValueError:
+                    remove_fails += 1
+                    continue
+                new_squad_ids.append(t1['in'].id)
+                new_squad_ids.append(t2['in'].id)
+                
+                team_counts = {}
+                for pid in new_squad_ids:
+                    p = next((pl for pl in players if pl.id == pid), None)
+                    if p:
+                        team_counts[p.team] = team_counts.get(p.team, 0) + 1
+                
+                if any(count > 3 for count in team_counts.values()):
+                    club_fails += 1
+                    continue
+                
+                combined_ep_gain = t1['ep_gain'] + t2['ep_gain']
+                
+                transfer_options.append({
+                    'transfers': [(t1['out'], t1['in']), (t2['out'], t2['in'])],
+                    'ep_gain': combined_ep_gain,
+                    'budget_saved': total_out - total_in
+                })
+                combinations_valid += 1
+        
+        # Also try best single transfers alone (for 1-transfer option within 2-transfer budget)
+        for t in single_transfers[:20]:
+            if t['budget_diff'] >= 0:  # Only if we can afford it
+                transfer_options.append({
+                    'transfers': [(t['out'], t['in'])],
+                    'ep_gain': t['ep_gain'],
+                    'budget_saved': t['budget_diff']
+                })
+        
+        log.info(f"Tried {combinations_tried} combinations, found {combinations_valid} valid 2-transfer options")
+        log.info(f"Added {min(20, len([t for t in single_transfers[:20] if t['budget_diff'] >= 0]))} single transfer options")
+        log.info(f"Failures - Budget: {budget_fails}, Club: {club_fails}, Remove: {remove_fails}")
+        
+        # Sort by combined EP gain and take top candidates
+        transfer_options.sort(key=lambda x: x['ep_gain'], reverse=True)
+        transfer_options = transfer_options[:100]  # Evaluate top 100 double transfers
+    
+    log.info(f"Evaluating {len(transfer_options)} transfer options")
+    
+    # Evaluate each transfer combination with optimal XI selection
+    best_option = None
+    best_objective = -float('inf')
+    
+    # First evaluate no transfer (baseline)
+    baseline_objective = evaluate_transfer_with_optimal_xi(
+        current_squad, -1, -1, players, horizon, bench_weight
+    )
+    log.info(f"Baseline (no transfer): {baseline_objective:.2f}")
+    
+    for i, option in enumerate(transfer_options):
+        # Apply transfers to create new squad
+        new_squad_ids = current_squad.copy()
+        
+        if i < 10:  # Log top 10 for debugging
+            if len(option['transfers']) == 1:
+                p_out, p_in = option['transfers'][0]
+                log.info(f"Evaluating: {p_out.name} -> {p_in.name} (EP gain: {option['ep_gain']:.2f})")
+            else:
+                transfers_str = ", ".join([f"{out.name}->{inp.name}" for out, inp in option['transfers']])
+                log.info(f"Evaluating: {transfers_str} (EP gain: {option['ep_gain']:.2f})")
+        
+        # Apply all transfers in this option
+        for p_out, p_in in option['transfers']:
+            idx = new_squad_ids.index(p_out.id)
+            new_squad_ids[idx] = p_in.id
+        
+        # Get squad players after transfers
+        squad_players = [p for p in players if p.id in new_squad_ids]
+        
+        # Optimize XI for this squad
+        prob = pulp.LpProblem("XI_Selection", pulp.LpMaximize)
+        xi_vars = {p.id: pulp.LpVariable(f"xi_{p.id}", cat="Binary") for p in squad_players}
+        
+        # Objective: maximize EP
+        prob += pulp.lpSum([
+            xi_vars[p.id] * p.eph + (1 - xi_vars[p.id]) * p.eph * bench_weight
+            for p in squad_players
+        ])
+        
+        # Constraints
+        prob += pulp.lpSum(xi_vars.values()) == 11
+        prob += pulp.lpSum([xi_vars[p.id] for p in squad_players if p.pos == "GKP"]) == 1
+        prob += pulp.lpSum([xi_vars[p.id] for p in squad_players if p.pos == "DEF"]) >= 3
+        prob += pulp.lpSum([xi_vars[p.id] for p in squad_players if p.pos == "DEF"]) <= 5
+        prob += pulp.lpSum([xi_vars[p.id] for p in squad_players if p.pos == "MID"]) >= 2
+        prob += pulp.lpSum([xi_vars[p.id] for p in squad_players if p.pos == "MID"]) <= 5
+        prob += pulp.lpSum([xi_vars[p.id] for p in squad_players if p.pos == "FWD"]) >= 1
+        prob += pulp.lpSum([xi_vars[p.id] for p in squad_players if p.pos == "FWD"]) <= 3
+        
+        prob.solve(pulp.PULP_CBC_CMD(msg=0))
+        
+        if prob.status == pulp.LpStatusOptimal:
+            objective = pulp.value(prob.objective)
+            
+            if i < 10:
+                log.info(f"  Objective after transfer(s): {objective:.2f} (gain: {objective - baseline_objective:.2f})")
+            
+            if objective > best_objective:
+                best_objective = objective
+                best_option = option
+    
+    if best_option and best_objective > baseline_objective:
+        if len(best_option['transfers']) == 1:
+            p_out, p_in = best_option['transfers'][0]
+            log.info(f"Best transfer: {p_out.name} -> {p_in.name}")
+        else:
+            transfers_str = ", ".join([f"{out.name}->{inp.name}" for out, inp in best_option['transfers']])
+            log.info(f"Best transfers: {transfers_str}")
+        log.info(f"Objective improvement: {best_objective - baseline_objective:.2f}")
+        
+        # Create the new squad with the transfers
+        new_squad_ids = current_squad.copy()
+        for p_out, p_in in best_option['transfers']:
+            idx = new_squad_ids.index(p_out.id)
+            new_squad_ids[idx] = p_in.id
+        
+        # Now optimize XI for the final squad
+        squad_players = [p for p in players if p.id in new_squad_ids]
+        
+        # Create final LP for XI selection
+        prob = pulp.LpProblem("Final_XI", pulp.LpMaximize)
+        xi_vars = {p.id: pulp.LpVariable(f"xi_{p.id}", cat="Binary") for p in squad_players}
+        captain_vars = {p.id: pulp.LpVariable(f"cap_{p.id}", cat="Binary") for p in squad_players}
+        
+        # Objective with captain bonus
+        prob += pulp.lpSum([
+            xi_vars[p.id] * p.eph + 
+            captain_vars[p.id] * p.ep1 +  # Captain bonus
+            (1 - xi_vars[p.id]) * p.eph * bench_weight
+            for p in squad_players
+        ])
+        
+        # Constraints
+        prob += pulp.lpSum(xi_vars.values()) == 11
+        prob += pulp.lpSum(captain_vars.values()) == 1
+        
+        # Captain must be in XI
+        for p in squad_players:
+            prob += captain_vars[p.id] <= xi_vars[p.id]
+        
+        # Formation
+        prob += pulp.lpSum([xi_vars[p.id] for p in squad_players if p.pos == "GKP"]) == 1
+        prob += pulp.lpSum([xi_vars[p.id] for p in squad_players if p.pos == "DEF"]) >= 3
+        prob += pulp.lpSum([xi_vars[p.id] for p in squad_players if p.pos == "DEF"]) <= 5
+        prob += pulp.lpSum([xi_vars[p.id] for p in squad_players if p.pos == "MID"]) >= 2
+        prob += pulp.lpSum([xi_vars[p.id] for p in squad_players if p.pos == "MID"]) <= 5
+        prob += pulp.lpSum([xi_vars[p.id] for p in squad_players if p.pos == "FWD"]) >= 1
+        prob += pulp.lpSum([xi_vars[p.id] for p in squad_players if p.pos == "FWD"]) <= 3
+        
+        prob.solve(pulp.PULP_CBC_CMD(msg=0))
+        
+        # Extract solution
+        xi = []
+        captain = None
+        for p in squad_players:
+            if xi_vars[p.id].varValue > 0.5:
+                xi.append(p)
+                if captain_vars[p.id].varValue > 0.5:
+                    captain = p
+        
+        bench = [p for p in squad_players if p not in xi]
+        bench.sort(key=lambda p: -p.ep1)
+        
+        # Determine formation
+        pos_counts = {"GKP": 0, "DEF": 0, "MID": 0, "FWD": 0}
+        for p in xi:
+            pos_counts[p.pos] += 1
+        
+        formation = "442"  # Default
+        for form, reqs in FORMATIONS.items():
+            if all(pos_counts[pos] == count for pos, count in reqs.items()):
+                formation = form
+                break
+        
+        # Prepare transfer details based on single or double transfers
+        if len(best_option['transfers']) == 1:
+            p_out, p_in = best_option['transfers'][0]
+            transfers_out = [p_out]
+            transfers_in = [p_in]
+        else:
+            transfers_out = [t[0] for t in best_option['transfers']]
+            transfers_in = [t[1] for t in best_option['transfers']]
+        
+        return {
+            'transfers_out': transfers_out,
+            'transfers_in': transfers_in,
+            'transfer_out': transfers_out[0] if len(transfers_out) == 1 else None,  # For backward compatibility
+            'transfer_in': transfers_in[0] if len(transfers_in) == 1 else None,
+            'squad': squad_players,
+            'xi': xi,
+            'bench': bench,
+            'captain': captain,
+            'formation': formation,
+            'objective_improvement': best_objective - baseline_objective
+        }
+    else:
+        log.info("No beneficial transfer found")
+        return None
+
+
 # ------------------- LP Optimization -------------------
 def optimize_with_lp(
     horizon: int = 5,
@@ -718,6 +1225,7 @@ def optimize_with_lp(
 ) -> Dict[str, Any]:
     """
     Linear Programming based optimization using PuLP.
+    Now uses two-stage approach for transfers.
     """
     if not HAS_PULP:
         return {"error": "PuLP not installed"}
@@ -725,8 +1233,13 @@ def optimize_with_lp(
     try:
         # Load player pool
         js = _fetch_bootstrap()
+        teams_map = {t["id"]: t["name"] for t in js.get("teams", [])}
         xmins_map = _load_xmins()
         ep_map, xgi_map, team_att_map = _load_ep_extras()
+        
+        # Load data-driven team quality scores once
+        from ..data.team_quality import get_team_quality_scores
+        team_quality_scores = get_team_quality_scores()
         
         # Load FDR data for fixture difficulty
         try:
@@ -739,20 +1252,207 @@ def optimize_with_lp(
             log.warning(f"FDR data not available: {e}")
             fdr_map = {}
         
+        # USE TWO-STAGE OPTIMIZATION FOR TRANSFERS
+        if current_squad and max_transfers > 0 and not wildcard:
+            log.info("Using two-stage optimization for transfers")
+            
+            # Load selling prices for current squad
+            selling_prices = {}
+            import json
+            import os
+            myteam_file = "data/processed/myteam_latest.json"
+            budget_limit = 1000  # Default
+            if os.path.exists(myteam_file):
+                with open(myteam_file) as f:
+                    myteam_data = json.load(f)
+                for pick in myteam_data.get("picks", []):
+                    selling_prices[pick["element"]] = pick.get("selling_price", pick.get("purchase_price", 0))
+                
+                # Calculate total budget
+                selling_value = sum(selling_prices.get(pid, 0) for pid in current_squad)
+                bank = myteam_data.get("transfers", {}).get("bank", 0)
+                budget_limit = selling_value + bank
+                log.info(f"Budget: Selling value={selling_value/10:.1f}m + Bank={bank/10:.1f}m = {budget_limit/10:.1f}m")
+            
+            # Create player objects
+            players = []
+            for e in js["elements"]:
+                pid = int(e["id"])
+                pos = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}[e["element_type"]]
+                team_id = int(e["team"])
+                
+                # Use selling price for current squad, current price for others
+                if pid in current_squad and pid in selling_prices:
+                    cost = selling_prices[pid]
+                else:
+                    cost = int(e.get("now_cost", 0))
+                
+                xmins = float(xmins_map.get(pid, 70.0))
+                ep_base = float(ep_map.get(pid, float(e.get("ep_next", 0))))
+                
+                # Skip ultra-cheap fodder unless in current squad
+                if pos != "GKP" and pid not in current_squad:
+                    if cost < 40 or (cost <= 45 and (ep_base < 1.5 or xmins < 30)):
+                        continue
+                
+                # Apply FDR adjustment
+                fdr_raw = fdr_map.get(pid, 3.0)
+                fdr_multiplier = 1.0 + (3.0 - fdr_raw) * 0.05
+                adjusted_eph = ep_base * horizon * fdr_multiplier
+                
+                # Get team quality
+                team_name = teams_map.get(team_id, "")
+                team_strength = team_quality_scores.get(team_name, 1.0)
+                
+                players.append(Player(
+                    id=pid,
+                    name=e.get("web_name", f"Player_{pid}"),
+                    pos=pos,
+                    team=team_id,
+                    cost=cost,
+                    xmins=xmins,
+                    ep_base=ep_base,
+                    xgi90=float(xgi_map.get(pid, 0)),
+                    team_att=float(team_att_map.get(pid, 1.0)),
+                    ep_seq=[ep_base * fdr_multiplier for _ in range(horizon)],
+                    ep1=ep_base,
+                    eph=adjusted_eph,
+                    form=float(e.get("form", 0)),
+                    selected_by=float(e.get("selected_by_percent", 0)),
+                    value_score=ep_base / (cost / 10) if cost > 0 else 0,
+                    is_differential=float(e.get("selected_by_percent", 0)) < 10.0 and ep_base > 3.0,
+                    injury_risk=0.1 if e.get("status") != "a" else 0.0,
+                    rotation_risk=max(0, (90 - xmins) / 90) if xmins < 60 else 0.0,
+                    team_strength=team_strength
+                ))
+            
+            # Run two-stage optimization
+            result = optimize_transfers_two_stage(
+                current_squad=current_squad,
+                players=players,
+                max_transfers=max_transfers,
+                horizon=horizon,
+                bench_weight=bench_weight,
+                budget_limit=budget_limit
+            )
+            
+            if result:
+                # Find vice captain (best non-captain in XI)
+                vice_captain = None
+                for p in result['xi']:
+                    if result['captain'] and p.id != result['captain'].id:
+                        if vice_captain is None or p.ep1 > vice_captain.ep1:
+                            vice_captain = p
+                
+                # Format the result
+                output = []
+                output.append(f"=== TRANSFER RECOMMENDATION ===")
+                
+                # Handle single or multiple transfers
+                if 'transfer_out' in result and result['transfer_out']:
+                    # Single transfer
+                    output.append(f"OUT: {result['transfer_out'].name} ({result['transfer_out'].pos}) - £{result['transfer_out'].cost/10:.1f}m, EP: {result['transfer_out'].ep1:.2f}")
+                    output.append(f"IN:  {result['transfer_in'].name} ({result['transfer_in'].pos}) - £{result['transfer_in'].cost/10:.1f}m, EP: {result['transfer_in'].ep1:.2f}")
+                else:
+                    # Multiple transfers
+                    for i, (p_out, p_in) in enumerate(zip(result['transfers_out'], result['transfers_in']), 1):
+                        output.append(f"Transfer {i}:")
+                        output.append(f"  OUT: {p_out.name} ({p_out.pos}) - £{p_out.cost/10:.1f}m, EP: {p_out.ep1:.2f}")
+                        output.append(f"  IN:  {p_in.name} ({p_in.pos}) - £{p_in.cost/10:.1f}m, EP: {p_in.ep1:.2f}")
+                
+                output.append(f"EP gain over {horizon} GWs: {result['objective_improvement']:.2f}")
+                output.append("")
+                output.append(f"=== OPTIMAL LINEUP (Formation {result['formation']}) ===")
+                output.append("Starting XI:")
+                for p in sorted(result['xi'], key=lambda x: ["GKP", "DEF", "MID", "FWD"].index(x.pos)):
+                    status = ""
+                    if result['captain'] and p.id == result['captain'].id:
+                        status = " (C)"
+                    elif vice_captain and p.id == vice_captain.id:
+                        status = " (VC)"
+                    output.append(f" - {p.name} ({p.pos}) — {p.ep1:.2f} pts{status}")
+                output.append("")
+                output.append("Bench:")
+                for i, p in enumerate(result['bench'], 1):
+                    output.append(f" {i}. {p.name} ({p.pos}) — {p.ep1:.2f} pts")
+                output.append("")
+                if result['captain']:
+                    output.append(f"Captain: {result['captain'].name} - {result['captain'].ep1:.2f} pts (doubled = {result['captain'].ep1*2:.2f})")
+                if vice_captain:
+                    output.append(f"Vice-Captain: {vice_captain.name} - {vice_captain.ep1:.2f} pts")
+                
+                total_cost = sum(p.cost for p in result['squad'])
+                bench_value = sum(p.cost for p in result['bench'])
+                expected_points = sum(p.ep1 for p in result['xi'])
+                if result['captain']:
+                    expected_points += result['captain'].ep1
+                
+                return {
+                    "squad": [
+                        {
+                            "id": p.id,
+                            "name": p.name,
+                            "pos": p.pos,
+                            "team": p.team,
+                            "cost": p.cost / 10,
+                            "ep1": p.ep1,
+                            "eph": p.eph,
+                            "xmins": p.xmins,
+                            "is_captain": result['captain'] and p.id == result['captain'].id,
+                            "in_xi": p in result['xi']
+                        }
+                        for p in result['squad']
+                    ],
+                    "transfers_out": [p.id for p in result.get('transfers_out', [result.get('transfer_out')])] if result.get('transfers_out') or result.get('transfer_out') else [],
+                    "transfers_in": [p.id for p in result.get('transfers_in', [result.get('transfer_in')])] if result.get('transfers_in') or result.get('transfer_in') else [],
+                    "formation": result['formation'],
+                    "total_cost": total_cost / 10,
+                    "bench_value": bench_value / 10,
+                    "expected_points_gw1": expected_points,
+                    "expected_points_total": expected_points,  # Add this for compatibility
+                    "optimization_score": result['objective_improvement'],
+                    "solver": "Two-Stage Transfer Optimization",
+                    "human_readable": "\n".join(output)
+                }
+            else:
+                return {
+                    "error": "No beneficial transfer found",
+                    "human_readable": "Two-stage optimization found no beneficial transfers within constraints"
+                }
+        
+        # For non-transfer cases (new squad or wildcard), continue with regular LP optimization
+        
+        # Load selling prices for current squad if doing transfers
+        selling_prices = {}
+        if current_squad:
+            import json
+            import os
+            myteam_file = "data/processed/myteam_latest.json"
+            if os.path.exists(myteam_file):
+                with open(myteam_file) as f:
+                    myteam_data = json.load(f)
+                for pick in myteam_data.get("picks", []):
+                    selling_prices[pick["element"]] = pick.get("selling_price", pick.get("purchase_price", 0))
+        
         # Create player objects with enhanced data
         players = []
         for e in js["elements"]:
             pid = int(e["id"])
             pos = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}[e["element_type"]]
             team_id = int(e["team"])
-            cost = int(e.get("now_cost", 0))
+            
+            # CRITICAL: Use selling price for current squad players, current price for others
+            if current_squad and pid in current_squad and pid in selling_prices:
+                cost = selling_prices[pid]
+            else:
+                cost = int(e.get("now_cost", 0))
             
             xmins = float(xmins_map.get(pid, 70.0))
             ep_base = float(ep_map.get(pid, float(e.get("ep_next", 0))))
             
-            # Skip ultra-cheap fodder unless it's a GKP (need cheap backup GKP)
-            # But keep some reasonable bench options
-            if pos != "GKP":
+            # Skip ultra-cheap fodder unless it's a GKP or in current squad
+            # But keep some reasonable bench options and all current squad players
+            if pos != "GKP" and not (current_squad and pid in current_squad):
                 if cost < 40:  # Less than £4.0m
                     continue
                 # Skip players with very low EP and minutes (not viable bench options)
@@ -771,10 +1471,19 @@ def optimize_with_lp(
             rotation_risk = max(0, (90 - xmins) / 90) if xmins < 60 else 0.0
             
             # Apply FDR adjustment to expected points over horizon
-            fdr_factor = fdr_map.get(pid, 1.0)  # Default to 1.0 if no FDR data
-            # FDR factor typically ranges from 0.8 (hard fixtures) to 1.2 (easy fixtures)
-            # For simplicity, apply a scaled version across the horizon
-            adjusted_eph = ep_base * horizon * (0.9 + 0.1 * fdr_factor)  # Scale FDR impact
+            # FDR represents fixture difficulty over next 5 games (1=easy, 5=hard)
+            # We'll apply a small adjustment: easy fixtures boost EP, hard fixtures reduce it
+            fdr_raw = fdr_map.get(pid, 3.0)  # Default to neutral (3.0) if no FDR data
+            # Convert FDR (1-5 scale) to multiplier (1.1 to 0.9)
+            # FDR 1 (easiest) -> 1.1x, FDR 3 (neutral) -> 1.0x, FDR 5 (hardest) -> 0.9x
+            fdr_multiplier = 1.0 + (3.0 - fdr_raw) * 0.05  # ±10% max adjustment
+            adjusted_eph = ep_base * horizon * fdr_multiplier
+            
+            # Use data-driven team quality scores (already loaded above)
+            team_name = teams_map.get(team_id, "")
+            
+            # Get team quality score (0.5-1.5 range where 1.0 is average)
+            team_strength = team_quality_scores.get(team_name, 1.0)
             
             players.append(Player(
                 id=pid,
@@ -786,7 +1495,7 @@ def optimize_with_lp(
                 ep_base=ep_base,
                 xgi90=float(xgi_map.get(pid, 0)),
                 team_att=float(team_att_map.get(pid, 1.0)),
-                ep_seq=[ep_base * (0.9 + 0.1 * fdr_factor) for _ in range(horizon)],
+                ep_seq=[ep_base * fdr_multiplier for _ in range(horizon)],
                 ep1=ep_base,
                 eph=adjusted_eph,
                 form=float(e.get("form", 0)),
@@ -794,14 +1503,89 @@ def optimize_with_lp(
                 value_score=value_score,
                 is_differential=is_differential,
                 injury_risk=injury_risk,
-                rotation_risk=rotation_risk
+                rotation_risk=rotation_risk,
+                team_strength=team_strength
             ))
         
         if not players:
             return {"error": "No valid players found"}
         
+        # Apply adjustments for players with limited minutes (like Gyökeres, Frimpong)
+        try:
+            from ..models.adjustments import apply_new_player_adjustments
+            from ..data.fpl_api import get_bootstrap
+            
+            # Create DataFrame for adjustments
+            player_data = []
+            for p in players:
+                player_data.append({
+                    'id': p.id,
+                    'player_id': p.id,
+                    'EPH': p.eph,
+                    'position': p.pos,
+                    'cost': p.cost
+                })
+            
+            predictions_df = pd.DataFrame(player_data)
+            bootstrap = get_bootstrap()
+            
+            # Apply adjustments with a reasonable floor
+            adjusted_df = apply_new_player_adjustments(
+                predictions_df,
+                features_df=pd.DataFrame(),
+                bootstrap_data=bootstrap,
+                min_minutes_threshold=180,  # < 2 full games
+                new_player_floor_multiplier=0.6  # At least 60% of position average for same price
+            )
+            
+            # Update player EPH values
+            adjustments_made = []
+            for p in players:
+                adj_row = adjusted_df[adjusted_df['id'] == p.id]
+                if not adj_row.empty:
+                    new_eph = adj_row.iloc[0].get('EPH', p.eph)
+                    if new_eph != p.eph and new_eph > p.eph:
+                        # Only adjust upward (don't make good players worse)
+                        adjustments_made.append(f"{p.name}: {p.eph:.2f} -> {new_eph:.2f}")
+                        ratio = new_eph / p.eph if p.eph > 0 else 1
+                        p.eph = new_eph
+                        p.ep_seq = [ep * ratio for ep in p.ep_seq]
+                        p.ep1 = p.ep_seq[0] if p.ep_seq else new_eph
+            
+            if adjustments_made:
+                log.info(f"Applied new player adjustments to {len(adjustments_made)} players")
+                for adj in adjustments_made[:5]:  # Show first 5
+                    log.info(f"  {adj}")
+        except Exception as e:
+            log.debug(f"Could not apply new player adjustments: {e}")
+        
         # Create LP problem
         prob = pulp.LpProblem("FPL_Squad", pulp.LpMaximize)
+        
+        # Debug: Check if key players are in the pool
+        if current_squad and max_transfers > 0:
+            virgil = next((p for p in players if p.id == 373), None)
+            xhaka = next((p for p in players if p.id == 668), None)
+            frimpong = next((p for p in players if p.id == 370), None)
+            reijnders = next((p for p in players if p.id == 427), None)
+            
+            log.info(f"Key players in LP pool (total={len(players)}):")
+            if virgil:
+                log.info(f"  Virgil (373): EPH={virgil.eph:.2f}, Cost=£{virgil.cost/10:.1f}m - IN POOL")
+            else:
+                log.info(f"  Virgil (373): NOT IN POOL")
+            if xhaka:
+                log.info(f"  Xhaka (668): EPH={xhaka.eph:.2f}, Cost=£{xhaka.cost/10:.1f}m - IN POOL")
+            else:
+                log.info(f"  Xhaka (668): NOT IN POOL")
+            if frimpong:
+                log.info(f"  Frimpong (370): EPH={frimpong.eph:.2f}, Cost=£{frimpong.cost/10:.1f}m - IN POOL")
+            else:
+                log.info(f"  Frimpong (370): NOT IN POOL")
+            if reijnders:
+                log.info(f"  Reijnders (427): EPH={reijnders.eph:.2f}, Cost=£{reijnders.cost/10:.1f}m - IN POOL")
+            else:
+                log.info(f"  Reijnders (427): NOT IN POOL")
         
         # Decision variables
         squad_vars = {p.id: pulp.LpVariable(f"squad_{p.id}", cat="Binary") for p in players}
@@ -810,31 +1594,55 @@ def optimize_with_lp(
         
         # Objective function
         objective_terms = []
+        
+        # Debug logging for key players if doing transfers
+        debug_players = []
+        if current_squad and max_transfers > 0:
+            debug_ids = [370, 373, 427, 668]  # Frimpong, Virgil, Reijnders, Xhaka
+            debug_players = [p for p in players if p.id in debug_ids]
+            
         for p in players:
             # Base expected points
             ep_contrib = p.eph
             
-            # Value bonus
-            value_bonus = p.value_score * value_weight * 10
+            # REMOVED: Form and team quality adjustments
+            # These are already accounted for:
+            # 1. Team quality: Models should learn from historical performance
+            # 2. FDR: Already applied when creating eph (line 783)
+            # 3. Form: Too volatile (1 game), causes overreaction
+            # We should trust the model predictions + FDR adjustment only
             
-            # Differential bonus
-            diff_bonus = differential_bonus * ep_contrib if p.is_differential else 0
+            # Value bonus - DISABLED because we care about points, not savings!
+            value_bonus = 0  # p.value_score * value_weight
+            
+            # Differential bonus - reduced to avoid chasing low-owned players
+            diff_bonus = differential_bonus * ep_contrib * 0.5 if p.is_differential else 0
             
             # Risk penalties
             risk_pen = (p.injury_risk + p.rotation_risk) * risk_penalty * ep_contrib
             
-            # XI bonus (starters worth more)
-            xi_bonus = ep_contrib * 0.2
+            # XI bonus removed - let the optimizer decide based on pure EP
+            xi_bonus = 0  # Was causing bias towards certain formations
             
             # Captain bonus (double points)
             cap_bonus = p.ep1
             
-            # Only count EP for XI players, not squad
-            # Bench players contribute nothing to objective
+            # XI players get full EP contribution
+            # Bench players get small contribution (10% of EP for bench strength)
+            bench_contrib = (squad_vars[p.id] - xi_vars[p.id]) * ep_contrib * bench_weight
+            
+            # Calculate total objective contribution for this player
+            xi_contrib = ep_contrib + value_bonus + diff_bonus - risk_pen
+            
+            # Debug logging for key players
+            if p in debug_players:
+                log.info(f"Objective for {p.name} ({p.id}): EPH={p.eph:.2f}, " +
+                        f"EP_contrib={ep_contrib:.2f}, XI_contrib={xi_contrib:.2f}")
+            
             objective_terms.append(
-                xi_vars[p.id] * (ep_contrib + value_bonus + diff_bonus - risk_pen) +
+                xi_vars[p.id] * xi_contrib +
                 captain_var[p.id] * cap_bonus +
-                squad_vars[p.id] * 0.01  # Tiny value for squad diversity
+                bench_contrib
             )
         
         prob += pulp.lpSum(objective_terms)
@@ -861,24 +1669,57 @@ def optimize_with_lp(
         for pos, count in POSITIONS.items():
             prob += pulp.lpSum([squad_vars[p.id] for p in players if p.pos == pos]) == count
         
-        # Formation constraints (exactly one valid formation)
-        formation_vars = {f: pulp.LpVariable(f"form_{f}", cat="Binary") for f in FORMATIONS}
-        prob += pulp.lpSum(formation_vars.values()) == 1
+        # Formation constraints - ONLY for initial squad selection (not transfers)
+        # When doing transfers, formations are irrelevant since we maintain position counts
+        if not current_squad:
+            # Only apply formation constraints when building a new squad from scratch
+            formation_vars = {f: pulp.LpVariable(f"form_{f}", cat="Binary") for f in FORMATIONS}
+            prob += pulp.lpSum(formation_vars.values()) == 1
+            
+            for formation, reqs in FORMATIONS.items():
+                for pos, required in reqs.items():
+                    prob += pulp.lpSum([xi_vars[p.id] for p in players if p.pos == pos]) >= required - 100 * (1 - formation_vars[formation])
+                    prob += pulp.lpSum([xi_vars[p.id] for p in players if p.pos == pos]) <= required + 100 * (1 - formation_vars[formation])
         
-        # DEBUG: Force 442 to test
-        # prob += formation_vars["442"] == 1
+        # Budget constraint - use actual selling prices from myteam data
+        if current_squad:
+            # Load myteam data to get actual selling prices and bank
+            import json
+            import os
+            myteam_file = "data/processed/myteam_latest.json"
+            if os.path.exists(myteam_file):
+                with open(myteam_file) as f:
+                    myteam_data = json.load(f)
+                
+                # Calculate total selling value of current squad + bank
+                selling_value = 0
+                for pick in myteam_data.get("picks", []):
+                    if pick["element"] in current_squad:
+                        selling_value += pick.get("selling_price", pick.get("purchase_price", 0))
+                
+                bank = myteam_data.get("transfers", {}).get("bank", 0)
+                budget_limit = selling_value + bank
+                
+                log.info(f"Budget calculation: Selling value={selling_value/10:.1f}m + Bank={bank/10:.1f}m = Total={budget_limit/10:.1f}m")
+                
+                # For no transfers, allow keeping current squad even if over budget
+                if max_transfers == 0:
+                    current_cost = sum(p.cost for p in players if p.id in current_squad)
+                    budget_limit = max(budget_limit, current_cost)
+            else:
+                log.warning(f"myteam file not found at {myteam_file}, using default budget")
+                budget_limit = BUDGET
+        else:
+            # For new squads (no current_squad), use standard budget
+            budget_limit = BUDGET
         
-        for formation, reqs in FORMATIONS.items():
-            for pos, required in reqs.items():
-                prob += pulp.lpSum([xi_vars[p.id] for p in players if p.pos == pos]) >= required - 100 * (1 - formation_vars[formation])
-                prob += pulp.lpSum([xi_vars[p.id] for p in players if p.pos == pos]) <= required + 100 * (1 - formation_vars[formation])
-        
-        # Budget constraint
-        prob += pulp.lpSum([squad_vars[p.id] * p.cost for p in players]) <= BUDGET
+        prob += pulp.lpSum([squad_vars[p.id] * p.cost for p in players]) <= budget_limit
         
         # Bench budget constraint
-        bench_cost = pulp.lpSum([squad_vars[p.id] * p.cost for p in players]) - pulp.lpSum([xi_vars[p.id] * p.cost for p in players])
-        prob += bench_cost <= bench_budget
+        # Skip this constraint if we're keeping current squad with no transfers
+        if not (current_squad and max_transfers == 0):
+            bench_cost = pulp.lpSum([squad_vars[p.id] * p.cost for p in players]) - pulp.lpSum([xi_vars[p.id] * p.cost for p in players])
+            prob += bench_cost <= bench_budget
         
         # Minimum bench quality - at least one bench player should have decent EP
         # This ensures viable substitution options
@@ -895,39 +1736,245 @@ def optimize_with_lp(
             prob += pulp.lpSum([bench_quality_vars[p.id] for p in viable_bench]) >= 2
         
         # Max 3 per club
+        # Note: This constraint is applied to the FINAL squad after transfers
         for team_id in set(p.team for p in players):
             prob += pulp.lpSum([squad_vars[p.id] for p in players if p.team == team_id]) <= MAX_PER_CLUB
         
         # Transfer constraints if current squad provided
         if current_squad and not wildcard:
-            for p in players:
-                if p.id in current_squad:
-                    # Encourage keeping current players
-                    prob += squad_vars[p.id] >= 0.8
+            # Create transfer variables for tracking changes
+            in_current = {p.id: (1 if p.id in current_squad else 0) for p in players}
+            
+            if max_transfers == 0:
+                # No transfers allowed - must keep exact current squad
+                for p in players:
+                    prob += squad_vars[p.id] == in_current[p.id]
+            else:
+                # Track transfers in and out
+                transfer_out_vars = {}
+                transfer_in_vars = {}
+                
+                for p in players:
+                    # Transfer out: was in current squad but not selected
+                    transfer_out_vars[p.id] = pulp.LpVariable(f"out_{p.id}", cat='Binary')
+                    # Transfer in: not in current squad but selected  
+                    transfer_in_vars[p.id] = pulp.LpVariable(f"in_{p.id}", cat='Binary')
+                    
+                    # Link transfer variables to squad selection
+                    if p.id in current_squad:
+                        # Can only transfer out if not selected
+                        prob += transfer_out_vars[p.id] >= in_current[p.id] - squad_vars[p.id]
+                        prob += transfer_out_vars[p.id] <= 1
+                        prob += transfer_in_vars[p.id] == 0  # Can't transfer in a player we already have
+                        
+                        # CRITICAL: If transferred out, CANNOT be in XI
+                        # Already handled by xi_vars[p.id] <= squad_vars[p.id] constraint earlier
+                    else:
+                        # Can only transfer in if selected
+                        prob += transfer_in_vars[p.id] >= squad_vars[p.id] - in_current[p.id]
+                        prob += transfer_in_vars[p.id] <= squad_vars[p.id]
+                        prob += transfer_out_vars[p.id] == 0  # Can't transfer out a player we don't have
+                        
+                        # New players can be in XI if transferred in
+                        prob += xi_vars[p.id] <= squad_vars[p.id]
+                
+                # Total transfers = players out (or equivalently, players in)
+                total_out = pulp.lpSum([transfer_out_vars[p.id] for p in players])
+                total_in = pulp.lpSum([transfer_in_vars[p.id] for p in players])
+                
+                # Transfers in must equal transfers out
+                prob += total_out == total_in
+                
+                # Limit total transfers
+                prob += total_out <= max_transfers
+                
+                # CRUCIAL: Position balance - transfers must maintain squad structure
+                # For each position, transfers out must equal transfers in
+                for pos in ['GKP', 'DEF', 'MID', 'FWD']:
+                    transfers_out_pos = pulp.lpSum([transfer_out_vars[p.id] for p in players if p.pos == pos])
+                    transfers_in_pos = pulp.lpSum([transfer_in_vars[p.id] for p in players if p.pos == pos])
+                    prob += transfers_out_pos == transfers_in_pos
+                
+                # CRITICAL FIX: Force optimal XI selection for transfers
+                # The issue is that the LP might keep lower-EP players in XI after transfers
+                # We need to ensure transferred-in players with higher EP go into XI
+                
+                # CRITICAL: If we transfer in a high-EP player, they MUST be in the XI
+                # This fixes the issue where the LP transfers in Reinildo but keeps him on bench
+                # while not considering Virgil who would go straight into XI
+                if max_transfers > 0:
+                    # For each transferred-in player, if their EP is high, force them into XI
+                    for p in players:
+                        if p.id not in current_squad:  # Potential transfer target
+                            # If this player has higher EP than current squad average for their position,
+                            # and they get transferred in, they should be in XI
+                            pos_players_current = [pl for pl in players if pl.pos == p.pos and pl.id in current_squad]
+                            if pos_players_current:
+                                avg_ep_current = sum(pl.eph for pl in pos_players_current) / len(pos_players_current)
+                                if p.eph > avg_ep_current * 1.2:  # 20% better than average
+                                    # If transferred in (transfer_in = 1), must be in XI (xi = 1)
+                                    prob += xi_vars[p.id] >= transfer_in_vars[p.id]
+                                    
+                    # Also ensure that if we transfer OUT a player from XI, we must transfer IN someone better
+                    # This prevents the LP from downgrading the XI through transfers
         
         # Solve
-        prob.solve(pulp.PULP_CBC_CMD(msg=0))
+        if current_squad and max_transfers > 0:
+            # Write LP to file for debugging
+            prob.writeLP("debug_transfer_lp.lp")
+            log.info("Wrote LP problem to debug_transfer_lp.lp")
         
-        # Debug: Check which formation was selected and why
-        selected_formation = None
-        for f, var in formation_vars.items():
-            if var.varValue and var.varValue > 0.5:
-                selected_formation = f
-                log.info(f"Selected formation: {f}")
-                
-                # Calculate what the XI EP would be for different formations
-                xi_players = [p for p in players if xi_vars[p.id].varValue and xi_vars[p.id].varValue > 0.5]
+        # Use CBC solver with options for finding optimal solution
+        # CBC always finds global optimum for LP problems
+        # We can add a small timeout to ensure it doesn't run forever
+        solver = pulp.PULP_CBC_CMD(
+            msg=1 if current_squad and max_transfers > 0 else 0,  # Show solver output for debugging transfers
+            timeLimit=30,  # Allow up to 30 seconds
+            gapRel=0.0  # Require exact optimum (0% gap)
+        )
+        
+        prob.solve(solver)
+        
+        # Log optimization details for debugging
+        if current_squad and max_transfers > 0:
+            if prob.status == pulp.LpStatusOptimal:
+                log.info(f"Transfer optimization completed successfully. Objective value: {pulp.value(prob.objective):.2f}")
+            elif prob.status == pulp.LpStatusInfeasible:
+                log.warning("LP problem is infeasible - no valid solution exists")
+            elif prob.status == pulp.LpStatusUnbounded:
+                log.warning("LP problem is unbounded - objective can be infinitely improved")
+            elif prob.status == pulp.LpStatusNotSolved:
+                log.warning("LP problem was not solved")
+            else:
+                log.warning(f"LP solver returned status: {pulp.LpStatus[prob.status]}")
+            
+            # Log current squad defenders for debugging
+            current_defs = [p for p in players if p.id in current_squad and p.pos == "DEF"]
+            log.info(f"Current squad defenders ({len(current_defs)}):")
+            for p in current_defs:
+                selected = "KEPT" if squad_vars[p.id].varValue > 0.5 else "TRANSFERRED OUT"
+                log.info(f"  {p.name} ({p.team}) ID={p.id} - EP={p.ep_base:.2f}, EPH={p.eph:.2f}, Cost=£{p.cost/10}m -> {selected}")
+            
+            # Log key Liverpool defenders for debugging Frimpong/Virgil issue
+            liverpool_defs = [p for p in players if p.pos == "DEF" and p.team == 12]  # Liverpool team ID
+            log.info(f"Liverpool defenders available ({len(liverpool_defs)}):")
+            for p in sorted(liverpool_defs, key=lambda x: x.eph, reverse=True)[:5]:  # Top 5 by EPH
+                in_squad = "CURRENT" if p.id in current_squad else "AVAILABLE"
+                selected = "SELECTED" if squad_vars[p.id].varValue > 0.5 else "NOT SELECTED"
+                log.info(f"  {p.name} (ID:{p.id}) - EP={p.ep_base:.2f}, EPH={p.eph:.2f}, Team strength={p.team_strength:.2f}, Cost=£{p.cost/10}m - {in_squad} -> {selected}")
+            
+            # Check Liverpool player count
+            liverpool_count = sum(1 for p in players if p.team == 12 and squad_vars[p.id].varValue > 0.5)
+            log.info(f"Liverpool players in final squad: {liverpool_count}/3 max")
+            liverpool_in_squad = [p.name for p in players if p.team == 12 and squad_vars[p.id].varValue > 0.5]
+            log.info(f"Liverpool players: {', '.join(liverpool_in_squad)}")
+            
+            # Log best transfer opportunities by EP gain
+            log.info("Top transfer opportunities (by EP gain):")
+            transfer_opportunities = []
+            for p_out in [p for p in players if p.id in current_squad]:
+                for p_in in [p for p in players if p.id not in current_squad and p.pos == p_out.pos]:
+                    if p_in.cost <= p_out.cost:  # Can afford
+                        ep_gain = p_in.eph - p_out.eph
+                        if ep_gain > 0:
+                            transfer_opportunities.append((ep_gain, p_out, p_in))
+            
+            for ep_gain, p_out, p_in in sorted(transfer_opportunities, key=lambda x: x[0], reverse=True)[:10]:
+                log.info(f"  {p_out.name} -> {p_in.name}: +{ep_gain:.2f} EP (£{p_out.cost/10:.1f}m -> £{p_in.cost/10:.1f}m)")
+            
+            # Check which players were transferred
+            transfers_made = []
+            
+            # First log the XI composition BEFORE transfers
+            log.info("XI before transfers:")
+            for p in players:
+                if p.id in current_squad and xi_vars[p.id].varValue and xi_vars[p.id].varValue > 0.5:
+                    log.info(f"  {p.name} ({p.pos}) ID={p.id} - EPH={p.eph:.2f}")
+            
+            # Check transfer variables directly
+            log.info("Transfer variables that are set to 1:")
+            for p in players:
+                if p.id in current_squad:
+                    if transfer_out_vars[p.id].varValue and transfer_out_vars[p.id].varValue > 0.5:
+                        was_xi = "XI" if xi_vars[p.id].varValue > 0.5 else "BENCH"
+                        log.info(f"  transfer_out[{p.id}] = 1: {p.name} ({p.pos}) was {was_xi}")
+                else:
+                    if transfer_in_vars[p.id].varValue and transfer_in_vars[p.id].varValue > 0.5:
+                        is_xi = "XI" if xi_vars[p.id].varValue > 0.5 else "BENCH"
+                        log.info(f"  transfer_in[{p.id}] = 1: {p.name} ({p.pos}) goes to {is_xi}")
+            
+            for p in players:
+                if p.id in current_squad and squad_vars[p.id].varValue < 0.5:
+                    transfers_made.append(("OUT", p))
+                    log.info(f"OUT: {p.name} ({p.pos}) ID={p.id} - EP over {horizon} GWs: {p.eph:.2f}, Cost: £{p.cost/10:.1f}m")
+                elif p.id not in current_squad and squad_vars[p.id].varValue > 0.5:
+                    transfers_made.append(("IN", p))
+                    log.info(f"IN: {p.name} ({p.pos}) ID={p.id} - EP over {horizon} GWs: {p.eph:.2f}, Cost: £{p.cost/10:.1f}m")
+            
+            # Calculate EP gain from transfers
+            if transfers_made:
+                ep_out = sum(p.eph for direction, p in transfers_made if direction == "OUT")
+                ep_in = sum(p.eph for direction, p in transfers_made if direction == "IN")
+                log.info(f"Transfer EP gain: {ep_in:.2f} - {ep_out:.2f} = {ep_in - ep_out:.2f}")
+        
+        # Debug: Check formation when using formation variables (new squad from scratch)
+        if not current_squad:
+            selected_formation = None
+            for f, var in formation_vars.items():
+                if var.varValue and var.varValue > 0.5:
+                    selected_formation = f
+                    log.info(f"Selected formation: {f}")
+                    
+                    # Calculate what the XI EP would be for different formations
+                    xi_players = [p for p in players if xi_vars[p.id].varValue and xi_vars[p.id].varValue > 0.5]
+                    total_xi_ep = sum(p.ep1 for p in xi_players)
+                    log.info(f"Total XI EP with {f}: {total_xi_ep:.2f}")
+                    
+                    # Show position breakdown
+                    pos_breakdown = {}
+                    for p in xi_players:
+                        pos_breakdown[p.pos] = pos_breakdown.get(p.pos, 0) + 1
+                    log.info(f"Position breakdown: {pos_breakdown}")
+                    break
+        else:
+            # For transfers, just log the XI composition
+            xi_players = [p for p in players if xi_vars[p.id].varValue and xi_vars[p.id].varValue > 0.5]
+            if xi_players:
                 total_xi_ep = sum(p.ep1 for p in xi_players)
-                log.info(f"Total XI EP with {f}: {total_xi_ep:.2f}")
-                
-                # Show position breakdown
                 pos_breakdown = {}
                 for p in xi_players:
                     pos_breakdown[p.pos] = pos_breakdown.get(p.pos, 0) + 1
-                log.info(f"Position breakdown: {pos_breakdown}")
-                break
+                log.info(f"XI composition after transfers: {pos_breakdown}, Total EP: {total_xi_ep:.2f}")
         
         if prob.status != pulp.LpStatusOptimal:
+            # Debug infeasible problems
+            if prob.status == pulp.LpStatusInfeasible:
+                log.warning("LP optimization infeasible - debugging constraints:")
+                if current_squad:
+                    current_positions = {"GKP": 0, "DEF": 0, "MID": 0, "FWD": 0}
+                    current_total_cost = 0
+                    missing_players = []
+                    for pid in current_squad:
+                        found = False
+                        for p in players:
+                            if p.id == pid:
+                                current_positions[p.pos] += 1
+                                current_total_cost += p.cost
+                                found = True
+                                break
+                        if not found:
+                            missing_players.append(pid)
+                    
+                    log.warning(f"Current squad positions: {current_positions}")
+                    log.warning(f"Current squad cost: £{current_total_cost/10:.1f}m")
+                    log.warning(f"Budget limit: £{budget_limit/10:.1f}m")
+                    log.warning(f"Max transfers: {max_transfers}")
+                    if missing_players:
+                        log.warning(f"Missing players in pool: {missing_players}")
+                    
+                    # Check if squad meets basic requirements
+                    if current_positions != POSITIONS:
+                        log.warning(f"Position mismatch! Required: {POSITIONS}, Current: {current_positions}")
             return {"error": f"Optimization failed with status: {pulp.LpStatus[prob.status]}"}
         
         # Extract solution
@@ -1061,6 +2108,50 @@ def optimize_transfers(
     Squad optimizer. Uses advanced LP solver if use_advanced=True,
     otherwise falls back to greedy approach.
     """
+    # Special case: No transfers with current squad - just evaluate current squad
+    current_squad = kwargs.get('current_squad')
+    max_transfers = kwargs.get('max_transfers', 2)
+    
+    if current_squad and max_transfers == 0:
+        # Just evaluate the current squad without optimization
+        log.info("No transfers allowed - evaluating current squad")
+        js = _fetch_bootstrap()
+        xmins_map = _load_xmins()
+        H = max(1, int(horizon))
+        weights = _parse_weights(hweights, H)
+        
+        # Get player data for current squad
+        players = []
+        for element in js["elements"]:
+            if element["id"] in current_squad:
+                pid = element["id"]
+                xmins = xmins_map.get(pid, element.get("minutes", 0) / 38 * 90 if element.get("minutes") else 45.0)
+                
+                # Calculate expected points
+                ep_blend, _, _ = _load_ep_extras()
+                ep1 = ep_blend.get(pid, element.get("ep_next", 0))
+                
+                players.append({
+                    "id": pid,
+                    "name": element["web_name"],
+                    "team": element["team"],
+                    "position": ["GKP", "DEF", "MID", "FWD"][element["element_type"] - 1],
+                    "cost": element["now_cost"] / 10,
+                    "xmins": xmins,
+                    "ep": ep1,
+                    "selected_by": element["selected_by_percent"],
+                })
+        
+        # Calculate total expected points
+        total_ep = sum(p["ep"] for p in players)
+        
+        return {
+            "squad": players,
+            "expected_points_gw1": total_ep,
+            "total_cost": sum(p["cost"] for p in players),
+            "human_readable": f"Current squad evaluated: {total_ep:.1f} expected points"
+        }
+    
     # Use LP optimizer if requested and available
     if use_advanced and HAS_PULP:
         log.info("Using advanced LP-based optimization")
@@ -1073,8 +2164,8 @@ def optimize_transfers(
             differential_bonus=kwargs.get('differential_bonus', 0.1),
             risk_penalty=kwargs.get('risk_penalty', 0.05),
             value_weight=kwargs.get('value_weight', 0.3),
-            current_squad=kwargs.get('current_squad'),
-            max_transfers=kwargs.get('max_transfers', 2),
+            current_squad=current_squad,
+            max_transfers=max_transfers,
             wildcard=kwargs.get('wildcard', False)
         )
         

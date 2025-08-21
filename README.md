@@ -5,10 +5,11 @@ A comprehensive machine learning system for Fantasy Premier League predictions a
 ## Features
 
 - **Advanced ML Models**: XGBoost/LightGBM ensemble for expected points, minutes, and clean sheets
-- **Transfer Optimization**: Linear Programming solver for mathematically optimal squad selection  
-- **Weekly Transfer Recommendations**: Analyzes your existing team and suggests optimal transfers
+- **Transfer Optimization**: Linear Programming solver for mathematically optimal squad selection with lineup/captain selection
+- **Weekly Transfer Recommendations**: Analyzes your existing team and suggests optimal transfers with banking strategy comparison
 - **Competition Detection**: Data-driven identification of backup players and rotation risks
 - **Recent Transfer Detection**: Web scraping to adjust for new signings
+- **New Player Adjustments**: Smart handling of players with limited data to avoid harsh penalties
 - **Chip Strategy**: Plans optimal usage of chips with 2025/26 double chips system
 - **Automated Pipeline**: Fully integrated data update, training, and post-processing
 
@@ -102,18 +103,26 @@ fpl transfers optimize --use-lp --exclude "Haaland,Salah" # Exclude players
 ```
 
 #### `fpl transfers recommend`
-Suggests transfers for your existing team.
+Suggests transfers for your existing team with optimal lineup and captain selection.
 
 Options:
 - `--consider-hits`: Allow point hits for transfers
 - `--max-transfers N`: Maximum transfers to suggest
 - `--horizon N`: Planning horizon
+- `--no-banking`: Disable banking strategy comparison
+
+Features:
+- Recommends optimal starting XI and bench order
+- Selects captain and vice-captain based on expected points
+- Compares making transfers now vs banking for next week (up to 5 FT cap)
+- Shows expected point gains for each strategy
 
 Examples:
 ```bash
-fpl transfers recommend                      # Basic recommendations
+fpl transfers recommend                      # Basic recommendations with banking
 fpl transfers recommend --consider-hits      # Allow -4 point hits
 fpl transfers recommend --max-transfers 2    # Limit to 2 transfers
+fpl transfers recommend --no-banking         # Disable banking comparison
 ```
 
 ### Team Management Commands
@@ -261,7 +270,12 @@ After training, several adjustments are applied:
      - 4-7 days: 65% of original xMins
      - 8-14 days: 40% of original xMins
 
-4. **EP Recalculation**:
+4. **New Player Adjustments** (`adjustments.py`):
+   - Prevents harsh penalties for players with limited minutes (<180 mins)
+   - Sets minimum floor at 60% of position average for same price bracket
+   - Ensures new signings aren't unfairly penalized
+
+5. **EP Recalculation**:
    - After xMins adjustments, recalculates `ep_adjusted`
    - Ensures consistency between playing time and points
 
@@ -280,9 +294,11 @@ Maximize: Σ(EP × captain_multiplier + value_bonus + difficulty_bonus - risk_pe
 - **Bench Budget**: Bench players cost ≤ specified budget
 
 #### Key Features:
+- **Two-Stage Optimization**: Evaluates transfers then optimizes lineup
 - **Formation Flexibility**: Automatically selects optimal formation
-- **Captain Selection**: Identifies best captain choice
-- **Bench Optimization**: Ensures viable bench within budget
+- **Captain/Vice-Captain Selection**: Identifies best captain and vice-captain choices
+- **Bench Optimization**: Orders bench by expected points
+- **Banking Strategy**: Compares immediate transfers vs saving for multiple transfers (up to 5 FT)
 - **Multi-horizon Planning**: Considers future fixtures
 
 ### 6. Integration & Automation
@@ -304,12 +320,20 @@ The system uses cross-validation to evaluate models:
 - Minutes Prediction: Accuracy ~85% for starters
 - Clean Sheets: AUC-ROC ~0.72
 
-## Recent Transfers & Competition
+## Recent Updates
 
+### Transfer Recommender Enhancements
+- **Lineup Optimization**: Now recommends optimal starting XI with captain/vice-captain
+- **Banking Strategy**: Compares making transfers now vs banking for next week
+- **FPL 5 FT Cap**: Updated to reflect FPL's current 5 free transfer maximum (was 2)
+- **New Player Adjustments**: Smart handling of players with limited data (<180 mins)
+
+### System Improvements
 The system automatically handles:
 - Players who recently transferred clubs (via web scraping)
 - Backup goalkeepers and rotation risks
 - New signings who need time to settle
+- Banking decisions for up to 5 free transfers
 
 ## Configuration
 
