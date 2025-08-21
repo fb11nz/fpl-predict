@@ -9,6 +9,7 @@ from ..utils.cache import RAW, SAMPLE
 from ..utils.io import write_parquet
 from ..utils.logging import get_logger
 from ..config import settings
+from .fpl_api import get_fixtures, get_bootstrap
 
 log = get_logger(__name__)
 
@@ -29,6 +30,38 @@ FD_COMP = {"EPL":"PL","LaLiga":"PD","Bundesliga":"BL1","SerieA":"SA","Ligue1":"F
 FD_BASE = "https://api.football-data.org/v4"
 FD_UK_CODE = {"EPL":"E0", "LaLiga":"SP1", "Bundesliga":"D1", "SerieA":"I1", "Ligue1":"F1"}
 FD_UK_BASE = "https://www.football-data.co.uk/mmz4281"
+
+def _fetch_current_season_from_fpl() -> pd.DataFrame:
+    """Fetch current season (2025-26) match results from FPL API."""
+    try:
+        fixtures = get_fixtures()
+        bootstrap = get_bootstrap()
+        
+        # Build team name mapping
+        teams = {t['id']: t['name'] for t in bootstrap.get('teams', [])}
+        
+        # Process fixtures that have been played
+        rows = []
+        for f in fixtures:
+            if f.get('finished') or f.get('finished_provisional'):
+                rows.append({
+                    'season': 2025,
+                    'date': pd.to_datetime(f.get('kickoff_time')),
+                    'home_team': teams.get(f.get('team_h')),
+                    'away_team': teams.get(f.get('team_a')),
+                    'home_goals': f.get('team_h_score'),
+                    'away_goals': f.get('team_a_score'),
+                    'gameweek': f.get('event'),
+                    'match_id': f.get('id'),
+                    'status': 'FINISHED'
+                })
+        
+        df = pd.DataFrame(rows)
+        log.info(f"Fetched {len(df)} played matches from FPL API for 2025-26 season")
+        return df
+    except Exception as e:
+        log.warning(f"Could not fetch current season from FPL API: {e}")
+        return pd.DataFrame()
 
 def _fd_headers() -> dict:
     tok = settings.FOOTBALL_DATA_TOKEN
@@ -113,6 +146,14 @@ def ingest_full(seasons: List[int] | None = None, leagues: List[str] | None = No
             if lg == "EPL" and not df.empty:
                 epl_all.append(df)
             time.sleep(0.5)
+    
+    # Also fetch current 2025-26 season data from FPL API
+    log.info("Fetching current season (2025-26) data from FPL API...")
+    current_season_df = _fetch_current_season_from_fpl()
+    if not current_season_df.empty:
+        write_parquet(current_season_df, outdir / "EPL_2025_matches.parquet")
+        epl_all.append(current_season_df)
+        log.info(f"Added {len(current_season_df)} matches from 2025-26 season")
 
     if epl_all:
         import pandas as pd

@@ -112,75 +112,58 @@ def expected_points_df(
     if not isinstance(p_cs, pd.Series):
         p_cs = pd.Series(p_cs, index=feats.index)
 
-    # Use real defensive stats from FPL API when available, else estimate
-    def get_defensive_contribution(row_pos, row_xmins, player_id=None):
-        """Get expected defensive contribution points per game"""
-        if row_xmins < 60:
-            return 0  # Need significant minutes for defensive contributions
+    # Calculate defensive contribution points using real DC data
+    def get_defensive_contribution_points(row):
+        """Get expected defensive contribution points based on actual DC stats"""
+        row_pos = row.get('position', '')
+        row_xmins = row.get('xmins', 0)
         
-        # Try to load real defensive stats
-        try:
-            import os
-            if os.path.exists('data/processed/defensive_stats.parquet'):
-                def_stats = pd.read_parquet('data/processed/defensive_stats.parquet')
-                if player_id is not None and player_id in def_stats['player_id'].values:
-                    player_stats = def_stats[def_stats['player_id'] == player_id].iloc[0]
-                    # Use real data if we have enough sample size
-                    if player_stats['minutes'] > 500 and player_stats['expected_defensive_points'] > 0:
-                        # Scale by expected minutes
-                        return player_stats['expected_defensive_points'] * (row_xmins / 90.0)
-        except:
-            pass
+        if row_xmins < 30:
+            return 0  # Need minutes for defensive contributions
         
-        # Fallback to estimates based on position and role
-        # DEF need 10 CBIT, MID/FWD need 12 CBIRT for 2 points
-        defensive_rates = {
-            'DEF': 6.0,  # ~1.5 games per bonus (10/6.0)
-            'MID': 3.0,  # ~4 games per bonus (12/3.0) 
-            'FWD': 1.0,  # ~12 games per bonus
-            'GKP': 0.0   # Goalkeepers don't get defensive contributions
-        }
+        # Use actual DC data if available
+        dc_per90 = row.get('dc_per90', 0)
+        dc_l5 = row.get('dc_l5', 0)
         
-        cbit_per90 = defensive_rates.get(row_pos, 0)
+        # Thresholds: DEF need 10 CBIT, MID/FWD need 12 CBIRT for 2 points
         threshold = 10 if row_pos == 'DEF' else 12
         
-        # Probability of hitting threshold in a game
-        prob_per_game = min(cbit_per90 / threshold, 0.5)  # Cap at 50% chance
+        # Use recent form (dc_l5) if available, else use per90 rate
+        dc_rate = dc_l5 if dc_l5 > 0 else dc_per90
         
-        # Points = 2 * probability * (xmins/90 to adjust for actual playing time)
-        return 2.0 * prob_per_game * (row_xmins / 90.0)
+        if dc_rate > 0:
+            # Calculate probability of hitting threshold per game
+            # DC includes all defensive actions (CBIT + recoveries + tackles)
+            prob_per_game = min(dc_rate / threshold, 0.8)  # Cap at 80% chance
+            
+            # Expected points = 2 * probability * (xmins/90)
+            return 2.0 * prob_per_game * (row_xmins / 90.0)
+        
+        # Fallback estimates if no DC data yet
+        default_rates = {
+            'DEF': 0.3,  # ~30% chance per game
+            'MID': 0.15,  # ~15% chance per game
+            'FWD': 0.05,  # ~5% chance per game
+            'GKP': 0.0   # No DC points for goalkeepers
+        }
+        
+        default_prob = default_rates.get(row_pos, 0)
+        return 2.0 * default_prob * (row_xmins / 90.0)
     
-    # Apply defensive contribution estimates
-    # This is a rough estimate until we get real data
-    try:
-        # Check if we have ICT threat data to refine estimates
-        from ..data.fpl_api import get_bootstrap
-        bs = get_bootstrap()
-        players_df = pd.DataFrame(bs['elements'])[['id', 'threat', 'minutes']]
-        players_df = players_df.rename(columns={'id': 'player_id'})
-        
-        # Low threat players (CDMs) get bonus for more defensive actions
-        players_df['threat_per90'] = (players_df['threat'] / players_df['minutes'].replace(0, 1)) * 90
-        threat_data = feats[['player_id']].merge(players_df[['player_id', 'threat_per90']], 
-                                                on='player_id', how='left')
-        
-        # CDMs and defensive players get higher defensive contribution
-        is_defensive = (pos == 'MID') & (threat_data['threat_per90'].fillna(50) < 35)
-        defensive_bonus = pd.Series(0.0, index=feats.index)
-        
-        for i in feats.index:
-            player_id = feats.loc[i, 'player_id'] if 'player_id' in feats.columns else None
-            base_contrib = get_defensive_contribution(pos.iloc[i], xmins.iloc[i], player_id)
-            # CDMs get 50% more defensive contributions
-            if is_defensive.iloc[i]:
-                base_contrib *= 1.5
-            defensive_bonus.iloc[i] = base_contrib
-    except:
-        # Fallback to simple position-based estimate
-        defensive_bonus = pd.Series([
-            get_defensive_contribution(p, xm, pid if 'player_id' in feats.columns else None) 
-            for p, xm, pid in zip(pos, xmins, feats['player_id'] if 'player_id' in feats.columns else [None]*len(pos))
-        ], index=feats.index)
+    # Calculate defensive contribution bonus using actual DC data
+    defensive_bonus = pd.Series(0.0, index=feats.index)
+    
+    # Create a DataFrame with the data we need for DC calculation
+    dc_data = pd.DataFrame({
+        'position': pos,
+        'xmins': xmins,
+        'dc_per90': feats.get('dc_per90', 0),
+        'dc_l5': feats.get('dc_l5', 0),
+        'dc_l3': feats.get('dc_l3', 0)
+    })
+    
+    # Apply the DC calculation to each row
+    defensive_bonus = dc_data.apply(get_defensive_contribution_points, axis=1)
     
     ep = (
         p1 * app1 +

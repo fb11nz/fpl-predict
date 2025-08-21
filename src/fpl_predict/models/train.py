@@ -33,6 +33,18 @@ XCOLS = [
     "mins_l5", "mins_l3", "starts_l5", "bench_l5",
     "form", "selected_by_percent", "chance_next", "now_cost",
     "prev_minutes", "prev_starts", "prev_xg_per90", "prev_xa_per90",
+    # Defensive contribution features (NEW!)
+    "dc_l5", "dc_l3", "dc_per90", "dc_total",
+    "tackles_l5", "tackles_total", "cbi_l5", "cbi_total", 
+    "recoveries_l5", "recoveries_total",
+    # ACTUAL PERFORMANCE DATA (CRITICAL!)
+    "goals_l5", "assists_l5", "goals_l3", "assists_l3",
+    "xg_l5", "xa_l5", "xg_l3", "xa_l3",
+    "bonus_l5", "bps_l5", "ict_l5",
+    "clean_sheets_l5", "goals_conceded_l5", "saves_l5",
+    "goals_per90", "assists_per90", "xg_per90", "xa_per90",
+    "home_goals", "away_goals", "home_xg", "away_xg",
+    "total_minutes", "total_starts", "avg_points", "form_trend",
     # Additional features from advanced engineering
     "team_offensive_strength_normalized", "team_defensive_strength_normalized",
     "mins_trend", "consistency_score", "starter_confidence", "fitness_factor",
@@ -88,29 +100,89 @@ def _tier_prior(prior_map: dict[int, float], cost: float) -> float:
 
 
 def _apply_xgi_priors_if_needed(feats: pd.DataFrame, mu_g: pd.Series, mu_a: pd.Series) -> tuple[pd.Series, pd.Series]:
-    """Apply price/position priors for new signings or low-signal players."""
+    """Apply FPL EP_next as baseline for new signings or low-signal players."""
+    from ..data.fpl_api import get_bootstrap
+    
     pos = feats.get("position", pd.Series("", index=feats.index)).astype(str)
     cost = feats.get("now_cost", pd.Series(0.0, index=feats.index)).fillna(0.0)
     prev_mins = feats.get("prev_minutes", pd.Series(0.0, index=feats.index)).fillna(0.0)
     mins_l5 = feats.get("mins_l5", pd.Series(0.0, index=feats.index)).fillna(0.0)
     mins_l3 = feats.get("mins_l3", pd.Series(0.0, index=feats.index)).fillna(0.0)
 
+    # Identify players needing FPL EP baseline
     likely_new = (prev_mins < 300) & ((mins_l5 + mins_l3) < 120)
     near_zero = (mu_g.fillna(0).abs() + mu_a.fillna(0).abs()) < 1e-6
-    needs_prior = likely_new | near_zero
+    needs_fpl_baseline = likely_new | near_zero
 
-    if not needs_prior.any():
+    if not needs_fpl_baseline.any():
         return mu_g, mu_a
+
+    # Get FPL's expected points as baseline
+    try:
+        bootstrap = get_bootstrap()
+        fpl_players = {p['id']: p for p in bootstrap['elements']}
+    except Exception:
+        log.warning("Could not fetch FPL data, falling back to price priors")
+        # Fallback to original price-based priors
+        mu_g2 = mu_g.copy()
+        mu_a2 = mu_a.copy()
+        for idx in feats.index[needs_fpl_baseline]:
+            p = pos.at[idx] if idx in pos.index else ""
+            c = float(cost.at[idx]) if idx in cost.index else 0.0
+            p = p if p in PRIORS_XG90 else "MID"
+            mu_g2.at[idx] = _tier_prior(PRIORS_XG90[p], c)
+            mu_a2.at[idx] = _tier_prior(PRIORS_XA90[p], c)
+        return mu_g2, mu_a2
 
     mu_g2 = mu_g.copy()
     mu_a2 = mu_a.copy()
 
-    for idx in feats.index[needs_prior]:
-        p = pos.at[idx] if idx in pos.index else ""
-        c = float(cost.at[idx]) if idx in cost.index else 0.0
-        p = p if p in PRIORS_XG90 else "MID"
-        mu_g2.at[idx] = _tier_prior(PRIORS_XG90[p], c)
-        mu_a2.at[idx] = _tier_prior(PRIORS_XA90[p], c)
+    for idx in feats.index[needs_fpl_baseline]:
+        player_id = feats.at[idx, 'player_id'] if 'player_id' in feats.columns else None
+        
+        if player_id and int(player_id) in fpl_players:
+            fpl_player = fpl_players[int(player_id)]
+            fpl_ep = float(fpl_player.get('ep_next', 0))
+            position = pos.at[idx] if idx in pos.index else ""
+            
+            # Convert FPL EP to goals/assists estimates
+            # Use conservative conversion: assume EP comes 60% from goals/assists, 40% from other sources
+            if position == "FWD":
+                # Forwards: 70% goals, 30% assists of attacking points
+                attacking_points = fpl_ep * 0.6
+                estimated_goals = (attacking_points * 0.7) / 4  # FWD goals worth 4pts
+                estimated_assists = (attacking_points * 0.3) / 3  # Assists worth 3pts
+            elif position == "MID":
+                # Midfielders: 50% goals, 50% assists of attacking points  
+                attacking_points = fpl_ep * 0.6
+                estimated_goals = (attacking_points * 0.5) / 5  # MID goals worth 5pts
+                estimated_assists = (attacking_points * 0.5) / 3
+            elif position == "DEF":
+                # Defenders: 30% goals, 70% assists of attacking points
+                attacking_points = fpl_ep * 0.3  # Less attacking expected
+                estimated_goals = (attacking_points * 0.3) / 6  # DEF goals worth 6pts
+                estimated_assists = (attacking_points * 0.7) / 3
+            else:  # GKP
+                estimated_goals = 0.0
+                estimated_assists = 0.0
+            
+            # Apply balanced weighting for new players:
+            # 50% current model prediction + 50% FPL EP estimate (less harsh than 80/20)
+            if mu_g.at[idx] == 0 and mu_a.at[idx] == 0:
+                # Pure new player - use FPL baseline more heavily
+                mu_g2.at[idx] = 0.3 * mu_g.at[idx] + 0.7 * estimated_goals
+                mu_a2.at[idx] = 0.3 * mu_a.at[idx] + 0.7 * estimated_assists
+            else:
+                # Has some model signal - balanced approach
+                mu_g2.at[idx] = 0.5 * mu_g.at[idx] + 0.5 * estimated_goals
+                mu_a2.at[idx] = 0.5 * mu_a.at[idx] + 0.5 * estimated_assists
+        else:
+            # Fallback to price priors if no FPL data
+            p = pos.at[idx] if idx in pos.index else ""
+            c = float(cost.at[idx]) if idx in cost.index else 0.0
+            p = p if p in PRIORS_XG90 else "MID"
+            mu_g2.at[idx] = _tier_prior(PRIORS_XG90[p], c)
+            mu_a2.at[idx] = _tier_prior(PRIORS_XA90[p], c)
 
     return mu_g2, mu_a2
 
@@ -147,7 +219,7 @@ def train_all() -> dict:
       - Slightly stronger FDR/CS effects to reflect real fixtures/defense impacts.
       - Persist xgi90_est and team_att for role-aware optimizer adjustments.
     """
-    log.info("Starting advanced model training pipeline")
+    log.info("Starting advanced model training pipeline with 2025-26 season data (including GW1 results)")
     
     # Load features
     feats = load_model_features()
@@ -169,11 +241,19 @@ def train_all() -> dict:
         log.warning(f"Feature engineering failed: {e}, using basic features")
         feats_enhanced = feats
     
-    # Build feature matrix and targets
+    # Build feature matrix and targets from ACTUAL MATCH DATA
     X = _build_X_advanced(feats_enhanced)
-    y_mins = feats["minutes"].fillna(0) if "minutes" in feats.columns else pd.Series(0.0, index=feats.index)
-    y_g = feats["goals"].fillna(0) if "goals" in feats.columns else pd.Series(0.0, index=feats.index)
-    y_a = feats["assists"].fillna(0) if "assists" in feats.columns else pd.Series(0.0, index=feats.index)
+    
+    # Use real training targets instead of non-existent columns
+    y_mins = feats["target_minutes"].fillna(0) if "target_minutes" in feats.columns else pd.Series(0.0, index=feats.index)
+    y_g = feats["target_goals"].fillna(0) if "target_goals" in feats.columns else pd.Series(0.0, index=feats.index)
+    y_a = feats["target_assists"].fillna(0) if "target_assists" in feats.columns else pd.Series(0.0, index=feats.index)
+    
+    # Log training data quality
+    log.info(f"Training targets: {(y_g > 0).sum()} players with goals, "
+             f"{(y_a > 0).sum()} with assists, {(y_mins > 0).sum()} with minutes")
+    log.info(f"Total goals in training: {y_g.sum():.1f}, assists: {y_a.sum():.1f}, "
+             f"avg minutes: {y_mins.mean():.1f}")
 
     # Initialize models
     m_mins = EnsembleModel(use_models=['xgboost', 'lightgbm', 'ridge'], cv_folds=3)
