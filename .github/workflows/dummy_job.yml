@@ -13,7 +13,9 @@ jobs:
       - name: Keep alive
         run: echo "Ping from Linux x64 runner"
       - name: Update System Packages
-        run: sudo apt update && sudo apt upgrade -y && sudo apt autoremove -y
+        run: |
+          id -un
+          sudo apt update && sudo apt upgrade -y && sudo apt autoremove -y
 
   keep-linux-ateam-server-1b:
     name: Keep Linux ATeam Server 1b Warm
@@ -22,7 +24,9 @@ jobs:
       - name: Keep alive
         run: echo "Ping from Linux x64 runner"
       - name: Update System Packages
-        run: sudo apt update && sudo apt upgrade -y && sudo apt autoremove -y
+        run: |
+          id -un
+          sudo apt update && sudo apt upgrade -y && sudo apt autoremove -y
 
   keep-linux-ateam-server-2:
     name: Keep Linux ATeam Server 2 Warm
@@ -31,7 +35,9 @@ jobs:
       - name: Keep alive
         run: echo "Ping from Linux x64 runner"
       - name: Update System Packages
-        run: sudo apt update && sudo apt upgrade -y && sudo apt autoremove -y
+        run: |
+          id -un
+          sudo apt update && sudo apt upgrade -y && sudo apt autoremove -y
 
   keep-linux-ateam-server-3:
     name: Keep Linux ATeam Server 3 Warm
@@ -40,7 +46,9 @@ jobs:
       - name: Keep alive
         run: echo "Ping from Linux x64 runner"
       - name: Update System Packages
-        run: sudo apt update && sudo apt upgrade -y && sudo apt autoremove -y
+        run: |
+          id -un
+          sudo apt update && sudo apt upgrade -y && sudo apt autoremove -y
 
   keep-linux-ateam-server-4:
     name: Keep Linux ATeam Server 4 Warm
@@ -48,6 +56,10 @@ jobs:
     steps:
       - name: Keep alive
         run: echo "Ping from Linux x64 runner"
+      - name: Update System Packages
+        run: |
+          id -un
+          sudo apt update && sudo apt upgrade -y && sudo apt autoremove -y
 
   keep-linux-arm64:
     name: Keep Linux ARM64 Runner Warm
@@ -56,7 +68,9 @@ jobs:
       - name: Keep alive
         run: echo "Ping from Linux ARM64 runner"
       - name: Update System Packages
-        run: sudo apt update && sudo apt upgrade -y && sudo apt autoremove -y
+        run: |
+          id -un
+          sudo apt update && sudo apt upgrade -y && sudo apt autoremove -y
 
   keep-macos-arm64:
     name: Keep macOS ARM64 Runner Warm
