@@ -97,14 +97,17 @@ def recommend_weekly_transfers(
     )
     if "error" not in baseline:
         squad_ids = [p["id"] for p in baseline.get("squad", [])]
+        # Get the expected points - try different fields
+        baseline_ep = baseline.get("expected_points_total", 0) or baseline.get("expected_points_gw1", 0)
         scenarios.append({
             "transfers": 0,
             "cost": 0,
-            "expected_points": baseline.get("expected_points_total", 0),
-            "net_points": baseline.get("expected_points_total", 0),
+            "expected_points": baseline_ep,
+            "net_points": baseline_ep,
             "squad": squad_ids,
             "changes": [],
-            "description": "Hold current squad"
+            "description": "Hold current squad",
+            "full_result": baseline  # Store full result for later reference
         })
     
     # Evaluate transfers up to free transfers available
@@ -231,15 +234,45 @@ def recommend_weekly_transfers(
         )
         
         if "error" not in banked_result:
-            banked_squad_ids = [p["id"] for p in banked_result.get("squad", [])]
-            banked_changes = identify_changes(current_squad, banked_squad_ids)
+            # Handle two-stage optimization results
+            if "transfers_out" in banked_result and "transfers_in" in banked_result:
+                # Two-stage optimization returns transfers directly
+                banked_changes = []
+                for i, pid_out in enumerate(banked_result["transfers_out"]):
+                    if i < len(banked_result["transfers_in"]):
+                        banked_changes.append({
+                            "out": pid_out,
+                            "in": banked_result["transfers_in"][i]
+                        })
+                banked_squad_ids = banked_result.get("squad", [])
+            else:
+                # Regular optimization returns squad
+                banked_squad_ids = [p["id"] for p in banked_result.get("squad", [])]
+                banked_changes = identify_changes(current_squad, banked_squad_ids)
             
             # Calculate EP gain for banking scenario
             banked_ep_gain = None
-            if "optimization_score" in banked_result:
+            
+            # Check if this is from two-stage optimization (has transfers_out/transfers_in)
+            if "transfers_out" in banked_result and "transfers_in" in banked_result and "optimization_score" in banked_result:
+                # Two-stage optimization - optimization_score is the EP gain
                 banked_ep_gain = banked_result["optimization_score"]
-            elif "expected_points_gw1" in banked_result and "expected_points_gw1" in baseline:
-                banked_ep_gain = banked_result["expected_points_gw1"] - baseline["expected_points_gw1"]
+            else:
+                # Regular LP optimization or fallback - need to compare against baseline
+                # Get the baseline expected points (no transfer scenario)
+                baseline_scenario = next((s for s in scenarios if s["transfers"] == 0), None)
+                if baseline_scenario:
+                    banked_expected = banked_result.get("expected_points_gw1", 0) or banked_result.get("expected_points_total", 0)
+                    baseline_expected = baseline_scenario.get("expected_points", 0) or baseline_scenario.get("net_points", 0)
+                    
+                    if banked_expected > 0 and baseline_expected > 0:
+                        # This is the actual EP gain from the transfers
+                        banked_ep_gain = banked_expected - baseline_expected
+                    else:
+                        # Try using the original baseline result
+                        if baseline and "expected_points_total" in baseline:
+                            baseline_expected = baseline["expected_points_total"]
+                            banked_ep_gain = banked_expected - baseline_expected
             
             # Add player names to changes
             from ..data.fpl_api import get_bootstrap
@@ -281,7 +314,40 @@ def recommend_weekly_transfers(
                 banking_note = None
                 actual_banking_advantage = (banked_ep_gain or 0) - current_best_ep_gain
             
+            # Smart banking decision logic
+            from .banking_logic import evaluate_banking_decision, format_banking_recommendation
+            from ..utils.io import read_parquet
+            from pathlib import Path
+            
+            # Load EP and xmins predictions for decision logic
+            try:
+                ep_df = read_parquet(Path("data/processed/exp_points.parquet"))
+                xmins_df = read_parquet(Path("data/processed/xmins.parquet"))
+                ep_map = dict(zip(ep_df['player_id'], ep_df['ep_adjusted']))
+                xmins_map = dict(zip(xmins_df['player_id'], xmins_df['xmins']))
+            except:
+                log.warning("Could not load predictions for banking logic")
+                ep_map = {}
+                xmins_map = {}
+            
+            # Get current changes from best scenario
+            current_changes_for_logic = []
+            if best_current and 'changes' in best_current:
+                current_changes_for_logic = best_current['changes']
+            
+            # Make intelligent banking decision
+            should_bank, reasoning, metrics = evaluate_banking_decision(
+                current_squad=current_squad,
+                banking_advantage=actual_banking_advantage,
+                best_current_gain=current_best_ep_gain,
+                banked_changes=banked_changes,
+                current_changes=current_changes_for_logic,
+                ep_predictions=ep_map,
+                xmins_predictions=xmins_map
+            )
+            
             banking_analysis = {
+                "evaluated": True,
                 "strategy": "bank",
                 "current_week_gain": 0,  # No transfer this week if banking
                 "next_week_gain": banked_ep_gain or 0,
@@ -296,6 +362,19 @@ def recommend_weekly_transfers(
                     "best_now": current_best_ep_gain,  # Best option with current FTs
                     "bank_for_next": banked_ep_gain or 0,  # Best option with more FTs next week
                     "banking_advantage": actual_banking_advantage
+                },
+                "decision": {
+                    "should_bank": should_bank,
+                    "reasoning": reasoning,
+                    "metrics": metrics,
+                    "formatted": format_banking_recommendation(
+                        should_bank=should_bank,
+                        reasoning=reasoning,
+                        metrics=metrics,
+                        banking_advantage=actual_banking_advantage,
+                        current_ft=free_transfers,
+                        next_week_ft=next_week_ft
+                    )
                 }
             }
             
@@ -519,6 +598,15 @@ def format_recommendation_output(recommendation: Dict[str, Any]) -> str:
             output.append(f"OUT: {out_name} ({out_team})")
             output.append(f" IN: {in_name} ({in_team})")
             output.append("")
+    
+    # Banking decision (if evaluated)
+    if "banking_analysis" in recommendation and recommendation["banking_analysis"]:
+        banking_info = recommendation["banking_analysis"]
+        if "decision" in banking_info:
+            decision = banking_info["decision"]
+            output.append("\n" + "-" * 40)
+            output.append("BANKING ANALYSIS:")
+            output.append(decision.get("formatted", "Banking analysis not available"))
     
     # Scenario comparison
     output.append("\n" + "-" * 40)

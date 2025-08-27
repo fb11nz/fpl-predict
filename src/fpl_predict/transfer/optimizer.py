@@ -1045,6 +1045,13 @@ def optimize_transfers_two_stage(
         # Sort by combined EP gain and take top candidates
         transfer_options.sort(key=lambda x: x['ep_gain'], reverse=True)
         transfer_options = transfer_options[:100]  # Evaluate top 100 double transfers
+    else:
+        # For 3+ transfers, fall back to regular LP optimization
+        # Two-stage optimization is complex for 3+ transfers and would require
+        # evaluating too many combinations
+        log.info(f"Two-stage optimization not implemented for {max_transfers} transfers, using regular LP")
+        # Return None to signal fallback to regular LP
+        return None
     
     log.info(f"Evaluating {len(transfer_options)} transfer options")
     
@@ -1336,7 +1343,11 @@ def optimize_with_lp(
                 budget_limit=budget_limit
             )
             
-            if result:
+            # If two-stage returns None (e.g., for 3+ transfers), fall back to regular LP
+            if result is None:
+                log.info(f"Two-stage optimization not available for {max_transfers} transfers, falling back to regular LP")
+                # Don't use two-stage for this case - continue to regular LP below
+            elif result is not None and result:
                 # Find vice captain (best non-captain in XI)
                 vice_captain = None
                 for p in result['xi']:
@@ -1414,7 +1425,8 @@ def optimize_with_lp(
                     "solver": "Two-Stage Transfer Optimization",
                     "human_readable": "\n".join(output)
                 }
-            else:
+            elif result is not None:
+                # result is False/empty - no beneficial transfer found
                 return {
                     "error": "No beneficial transfer found",
                     "human_readable": "Two-stage optimization found no beneficial transfers within constraints"

@@ -196,12 +196,28 @@ def transfers_recommend(entry: int | None, max_transfers: int, horizon: int, con
                 
                 click.echo(f"\nBanking advantage: {ba['comparison']['banking_advantage']:+.2f} EP")
                 
-                if ba['comparison']['banking_advantage'] > 0:
-                    click.echo(f"\n✓ Recommendation: Bank your transfer for {next_ft} FT next week")
-                else:
-                    click.echo(f"\n✓ Recommendation: Use your {current_ft} FT now")
-                    if ba.get('overlapping_transfer'):
+                # Use the smart decision logic if available
+                if 'decision' in ba:
+                    decision = ba['decision']
+                    if decision.get('should_bank'):
+                        click.echo(f"\n✓ Recommendation: Bank your transfer for {next_ft} FT next week")
+                    else:
+                        click.echo(f"\n✓ Recommendation: Use your {current_ft} FT now")
+                    
+                    # Show reasoning if available
+                    if decision.get('reasoning'):
+                        click.echo(f"   Reasoning: {decision['reasoning']}")
+                    
+                    if ba.get('overlapping_transfer') and not decision.get('should_bank'):
                         click.echo("   You'll get the benefit immediately and maintain flexibility")
+                else:
+                    # Fall back to simple comparison if smart logic not available
+                    if ba['comparison']['banking_advantage'] > 0:
+                        click.echo(f"\n✓ Recommendation: Bank your transfer for {next_ft} FT next week")
+                    else:
+                        click.echo(f"\n✓ Recommendation: Use your {current_ft} FT now")
+                        if ba.get('overlapping_transfer'):
+                            click.echo("   You'll get the benefit immediately and maintain flexibility")
         else:
             # Fall back to old format
             from .transfer.recommend import format_recommendation_output

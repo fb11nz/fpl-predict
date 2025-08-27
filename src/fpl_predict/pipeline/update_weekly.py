@@ -123,11 +123,21 @@ def fix_squad_roles_post_training():
                     xmins_df.loc[idx, 'xmins'] = new_xmins
                     n_changes += 1
         
+        # Apply availability adjustments for injured/unavailable players
+        log.info("Applying availability adjustments...")
+        from ..models.availability import apply_availability_adjustments
+        
+        # First update xmins based on availability
+        xmins_df = apply_availability_adjustments(xmins_df, bootstrap)
+        
         # Save updated xmins
         write_parquet(xmins_df, PROC / "xmins.parquet")
         
-        # Update ep_adjusted
+        # Update ep_adjusted with availability adjustments
         ep_df = read_parquet(PROC / "exp_points.parquet")
+        ep_df = apply_availability_adjustments(ep_df, bootstrap)
+        
+        # Also recalculate ep_adjusted based on updated xmins
         xmins_map = dict(zip(xmins_df['player_id'], xmins_df['xmins']))
         ep_df['ep_adjusted'] = ep_df['ep_blend'] * ep_df['player_id'].map(xmins_map).fillna(0) / 90.0
         write_parquet(ep_df, PROC / "exp_points.parquet")
