@@ -149,21 +149,33 @@ def fix_squad_roles_post_training():
 
 def update_weekly_data(demo_mode: bool = False) -> None:
     log.info("Starting weekly update (demo=%s)", demo_mode)
+
+    # Step 1: Ingest latest data from FPL API
     if demo_mode:
         bootstrap_raw_from_sample()
     else:
         ingest_full()
+
+    # Step 2: Build features from the fresh data
     build_features()
     update_readme_scoring_table(ROOT / "README.md")
     compute_fdr()
     build_player_next5_fdr()
 
+    # Step 3: IMPORTANT - Delete old training data to force rebuild with current stats
+    # This fixes the bug where models were using months-old player statistics
+    training_data_file = PROC / "training_data.parquet"
+    if training_data_file.exists():
+        log.info("Removing old training_data.parquet to force rebuild with current player stats")
+        training_data_file.unlink()
+
+    # Step 4: Train models (will now rebuild training data with current stats)
     models = train_all()
     write_json({"saved_at": now_utc_str(), "models": list(models.keys())}, MODELS / "latest.json")
-    
-    # Apply post-training fixes for squad roles
+
+    # Step 5: Apply post-training fixes for squad roles
     fix_squad_roles_post_training()
-    
+
     write_json({"updated_at": now_utc_str()}, DATA / "processed" / "weekly_changelog.json")
     log.info("Weekly update complete.")
 

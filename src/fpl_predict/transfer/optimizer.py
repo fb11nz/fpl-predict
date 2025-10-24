@@ -73,6 +73,25 @@ def _fetch_bootstrap() -> dict:
     return r.json()
 
 
+def _get_next_gameweek() -> int:
+    """Get the next gameweek number from FPL API."""
+    try:
+        bootstrap = _fetch_bootstrap()
+        # Find the next gameweek (is_next=True) or current gameweek (is_current=True)
+        next_gw = next((e['id'] for e in bootstrap.get('events', []) if e.get('is_next')), None)
+        if next_gw:
+            return next_gw
+        # Fallback to current gameweek if next is not set
+        current_gw = next((e['id'] for e in bootstrap.get('events', []) if e.get('is_current')), None)
+        if current_gw:
+            return current_gw
+        # Final fallback
+        return 1
+    except Exception as e:
+        log.warning(f"Could not get current gameweek: {e}")
+        return 1
+
+
 def _fetch_fixtures() -> list:
     r = requests.get("https://fantasy.premierleague.com/api/fixtures/", timeout=30)
     r.raise_for_status()
@@ -647,8 +666,9 @@ def _format_advanced_result(result: Dict[str, Any], horizon: int, bench_budget: 
         return f" - {p.name} ({p.position}) — ep1 {p.ep_next:.2f}, next{horizon} {sum(p.ep_horizon[:horizon]):.2f}, xMins {p.xmins:.0f}, £{p.price:.1f}m"
     
     human = []
+    next_gw = _get_next_gameweek()
     human.append(f"Suggested 15-man squad (LP Optimized), formation {formation}:")
-    human.append(f"Expected Points (GW1): {result.get('expected_points_gw1', 0):.1f}")
+    human.append(f"Expected Points (GW{next_gw}): {result.get('expected_points_gw1', 0):.1f}")
     human.append(f"Optimization Score: {result.get('optimization_score', 0):.1f}")
     human.append("")
     
@@ -1434,9 +1454,9 @@ def optimize_with_lp(
         
         # For non-transfer cases (new squad or wildcard), continue with regular LP optimization
         
-        # Load selling prices for current squad if doing transfers
+        # Load selling prices for current squad if doing transfers (but NOT for wildcard)
         selling_prices = {}
-        if current_squad:
+        if current_squad and not wildcard:
             import json
             import os
             myteam_file = "data/processed/myteam_latest.json"
@@ -1445,16 +1465,17 @@ def optimize_with_lp(
                     myteam_data = json.load(f)
                 for pick in myteam_data.get("picks", []):
                     selling_prices[pick["element"]] = pick.get("selling_price", pick.get("purchase_price", 0))
-        
+
         # Create player objects with enhanced data
         players = []
         for e in js["elements"]:
             pid = int(e["id"])
             pos = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}[e["element_type"]]
             team_id = int(e["team"])
-            
-            # CRITICAL: Use selling price for current squad players, current price for others
-            if current_squad and pid in current_squad and pid in selling_prices:
+
+            # CRITICAL: Use selling price for current squad players (but NOT on wildcard)
+            # On wildcard, all players are bought at current market price
+            if current_squad and not wildcard and pid in current_squad and pid in selling_prices:
                 cost = selling_prices[pid]
             else:
                 cost = int(e.get("now_cost", 0))
@@ -1677,24 +1698,39 @@ def optimize_with_lp(
         for p in players:
             prob += captain_var[p.id] <= xi_vars[p.id]
         
-        # Position constraints
+        # Position constraints for SQUAD (15 players)
         for pos, count in POSITIONS.items():
             prob += pulp.lpSum([squad_vars[p.id] for p in players if p.pos == pos]) == count
-        
-        # Formation constraints - ONLY for initial squad selection (not transfers)
-        # When doing transfers, formations are irrelevant since we maintain position counts
+
+        # Formation constraints for STARTING XI
+        # CRITICAL: Always enforce valid formation for XI, even when doing transfers
+        prob += pulp.lpSum([xi_vars[p.id] for p in players if p.pos == "GKP"]) == 1
+        prob += pulp.lpSum([xi_vars[p.id] for p in players if p.pos == "DEF"]) >= 3
+        prob += pulp.lpSum([xi_vars[p.id] for p in players if p.pos == "DEF"]) <= 5
+        prob += pulp.lpSum([xi_vars[p.id] for p in players if p.pos == "MID"]) >= 2
+        prob += pulp.lpSum([xi_vars[p.id] for p in players if p.pos == "MID"]) <= 5
+        prob += pulp.lpSum([xi_vars[p.id] for p in players if p.pos == "FWD"]) >= 1
+        prob += pulp.lpSum([xi_vars[p.id] for p in players if p.pos == "FWD"]) <= 3
+
+        # Additional formation selection for initial squad (not needed for transfers)
         if not current_squad:
-            # Only apply formation constraints when building a new squad from scratch
+            # Only apply specific formation selection when building a new squad from scratch
             formation_vars = {f: pulp.LpVariable(f"form_{f}", cat="Binary") for f in FORMATIONS}
             prob += pulp.lpSum(formation_vars.values()) == 1
-            
+
             for formation, reqs in FORMATIONS.items():
                 for pos, required in reqs.items():
                     prob += pulp.lpSum([xi_vars[p.id] for p in players if p.pos == pos]) >= required - 100 * (1 - formation_vars[formation])
                     prob += pulp.lpSum([xi_vars[p.id] for p in players if p.pos == pos]) <= required + 100 * (1 - formation_vars[formation])
         
-        # Budget constraint - use actual selling prices from myteam data
-        if current_squad:
+        # Budget constraint - check if budget_limit was passed (e.g., from wildcard mode)
+        # Otherwise calculate from current squad
+        budget_limit = kwargs.get('budget_limit')
+
+        if budget_limit:
+            # Budget already calculated (e.g., wildcard mode)
+            log.info(f"Using pre-calculated budget: £{budget_limit/10:.1f}m")
+        elif current_squad:
             # Load myteam data to get actual selling prices and bank
             import json
             import os
@@ -1702,18 +1738,19 @@ def optimize_with_lp(
             if os.path.exists(myteam_file):
                 with open(myteam_file) as f:
                     myteam_data = json.load(f)
-                
+
+                # Regular transfers: budget = selling value + bank
                 # Calculate total selling value of current squad + bank
                 selling_value = 0
                 for pick in myteam_data.get("picks", []):
                     if pick["element"] in current_squad:
                         selling_value += pick.get("selling_price", pick.get("purchase_price", 0))
-                
+
                 bank = myteam_data.get("transfers", {}).get("bank", 0)
                 budget_limit = selling_value + bank
-                
+
                 log.info(f"Budget calculation: Selling value={selling_value/10:.1f}m + Bank={bank/10:.1f}m = Total={budget_limit/10:.1f}m")
-                
+
                 # For no transfers, allow keeping current squad even if over budget
                 if max_transfers == 0:
                     current_cost = sum(p.cost for p in players if p.id in current_squad)
@@ -2032,9 +2069,10 @@ def optimize_with_lp(
         expected_points = sum(p.ep1 for p in xi) + (next(p.ep1 for p in xi if p.id == captain_id) if captain_id else 0)
         
         # Build human-readable output
+        next_gw = _get_next_gameweek()
         output = []
         output.append(f"Suggested 15-man squad (LP Optimized), formation {formation}:")
-        output.append(f"Expected Points (GW1): {expected_points:.1f}")
+        output.append(f"Expected Points (GW{next_gw}): {expected_points:.1f}")
         output.append(f"Optimization Score: {pulp.value(prob.objective):.1f}")
         output.append("")
         
@@ -2120,8 +2158,42 @@ def optimize_transfers(
     Squad optimizer. Uses advanced LP solver if use_advanced=True,
     otherwise falls back to greedy approach.
     """
-    # Special case: No transfers with current squad - just evaluate current squad
+    # Load current squad if use_myteam is specified
+    # BUT: on wildcard, we don't want current_squad to constrain the optimization
+    # We only need it to calculate the budget
     current_squad = kwargs.get('current_squad')
+    wildcard = kwargs.get('wildcard', False)
+
+    if use_myteam and not current_squad:
+        # Load current squad from myteam data (for budget calculation)
+        import json
+        import os
+        myteam_file = "data/processed/myteam_latest.json"
+        if os.path.exists(myteam_file):
+            with open(myteam_file) as f:
+                myteam_data = json.load(f)
+            current_squad = [pick["element"] for pick in myteam_data.get("picks", [])]
+
+            # On wildcard, calculate budget but don't pass current_squad to optimizer
+            # This allows building a completely fresh team
+            if wildcard:
+                # Calculate wildcard budget from selling prices
+                selling_value = sum(pick.get("selling_price", pick.get("purchase_price", 0))
+                                   for pick in myteam_data.get("picks", []))
+                bank = myteam_data.get("transfers", {}).get("bank", 0)
+                wildcard_budget = selling_value + bank
+                kwargs['budget_limit'] = wildcard_budget
+                log.info(f"Wildcard mode: Budget = £{wildcard_budget/10:.1f}m (selling value £{selling_value/10:.1f}m + bank £{bank/10:.1f}m)")
+                # Don't pass current_squad - build fresh team
+                current_squad = None
+            else:
+                # Regular transfers - use current squad
+                kwargs['current_squad'] = current_squad
+                log.info(f"Loaded current squad from myteam: {len(current_squad)} players")
+        else:
+            log.warning(f"use_myteam=True but myteam file not found at {myteam_file}")
+
+    # Special case: No transfers with current squad - just evaluate current squad
     max_transfers = kwargs.get('max_transfers', 2)
     
     if current_squad and max_transfers == 0:
@@ -2156,12 +2228,112 @@ def optimize_transfers(
         
         # Calculate total expected points
         total_ep = sum(p["ep"] for p in players)
-        
+
+        # Generate full lineup output for current squad (same format as transfers)
+        # This ensures lineup is displayed when banking/holding
+
+        # Sort players by expected points to determine captain and lineup
+        sorted_players = sorted(players, key=lambda x: -x["ep"])
+
+        # Find the best captain (highest EP)
+        captain = sorted_players[0] if sorted_players else None
+        captain_id = captain["id"] if captain else None
+
+        # Find vice captain (second highest EP)
+        vice_captain = sorted_players[1] if len(sorted_players) > 1 else None
+        vice_captain_id = vice_captain["id"] if vice_captain else None
+
+        # Determine the best formation and lineup
+        # Group players by position
+        by_position = {"GKP": [], "DEF": [], "MID": [], "FWD": []}
+        for p in players:
+            by_position[p["position"]].append(p)
+
+        # Sort each position by EP
+        for pos in by_position:
+            by_position[pos].sort(key=lambda x: -x["ep"])
+
+        # Common formations to try
+        formations_to_try = ["442", "433", "343", "352", "451", "541", "532"]
+        best_formation = None
+        best_xi = []
+        best_ep = 0
+
+        for form in formations_to_try:
+            n_def = int(form[0])
+            n_mid = int(form[1])
+            n_fwd = int(form[2])
+
+            # Check if we have enough players for this formation
+            if (len(by_position["GKP"]) >= 1 and
+                len(by_position["DEF"]) >= n_def and
+                len(by_position["MID"]) >= n_mid and
+                len(by_position["FWD"]) >= n_fwd):
+
+                # Build XI for this formation
+                xi = []
+                xi.extend(by_position["GKP"][:1])  # 1 GKP
+                xi.extend(by_position["DEF"][:n_def])
+                xi.extend(by_position["MID"][:n_mid])
+                xi.extend(by_position["FWD"][:n_fwd])
+
+                # Calculate EP for this XI
+                xi_ep = sum(p["ep"] for p in xi)
+                # Add captain bonus
+                if captain and captain in xi:
+                    xi_ep += captain["ep"]
+
+                if xi_ep > best_ep:
+                    best_ep = xi_ep
+                    best_xi = xi
+                    best_formation = form
+
+        if not best_formation:
+            # Fallback to a default formation if none work
+            best_formation = "442"
+            best_xi = []
+            best_xi.extend(by_position["GKP"][:1])
+            best_xi.extend(by_position["DEF"][:4])
+            best_xi.extend(by_position["MID"][:4])
+            best_xi.extend(by_position["FWD"][:2])
+
+        # Determine bench (everyone not in XI)
+        xi_ids = {p["id"] for p in best_xi}
+        bench = [p for p in players if p["id"] not in xi_ids]
+        bench.sort(key=lambda x: -x["ep"])  # Sort bench by EP
+
+        # Build human readable output with full lineup
+        output = []
+        output.append(f"Current squad evaluated: {total_ep:.1f} expected points")
+        output.append("")
+        output.append(f"=== OPTIMAL LINEUP (Formation {best_formation}) ===")
+        output.append("Starting XI:")
+
+        # Sort XI by position for display
+        for p in sorted(best_xi, key=lambda x: ["GKP", "DEF", "MID", "FWD"].index(x["position"])):
+            status = ""
+            if p["id"] == captain_id:
+                status = " (C)"
+            elif p["id"] == vice_captain_id:
+                status = " (VC)"
+            output.append(f" - {p['name']} ({p['position']}) — {p['ep']:.2f} pts{status}")
+
+        output.append("")
+        output.append("Bench:")
+        for i, p in enumerate(bench, 1):
+            output.append(f" {i}. {p['name']} ({p['position']}) — {p['ep']:.2f} pts")
+
+        output.append("")
+        if captain:
+            output.append(f"Captain: {captain['name']} - {captain['ep']:.2f} pts (doubled = {captain['ep']*2:.2f})")
+        if vice_captain:
+            output.append(f"Vice-Captain: {vice_captain['name']} - {vice_captain['ep']:.2f} pts")
+
         return {
             "squad": players,
             "expected_points_gw1": total_ep,
             "total_cost": sum(p["cost"] for p in players),
-            "human_readable": f"Current squad evaluated: {total_ep:.1f} expected points"
+            "human_readable": "\n".join(output)
         }
     
     # Use LP optimizer if requested and available
@@ -2178,7 +2350,8 @@ def optimize_transfers(
             value_weight=kwargs.get('value_weight', 0.3),
             current_squad=current_squad,
             max_transfers=max_transfers,
-            wildcard=kwargs.get('wildcard', False)
+            wildcard=kwargs.get('wildcard', False),
+            budget_limit=kwargs.get('budget_limit')  # Pass wildcard budget if set
         )
         
         if result and "error" not in result:

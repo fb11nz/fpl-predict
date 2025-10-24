@@ -7,10 +7,12 @@ A comprehensive machine learning system for Fantasy Premier League predictions a
 - **Advanced ML Models**: XGBoost/LightGBM ensemble for expected points, minutes, and clean sheets
 - **Transfer Optimization**: Linear Programming solver for mathematically optimal squad selection with lineup/captain selection
 - **Weekly Transfer Recommendations**: Analyzes your existing team and suggests optimal transfers with banking strategy comparison
+- **Fixture-Based EP Predictions**: Per-gameweek expected points using FDR and venue adjustments
+- **Free Hit Team Generator**: Builds optimal 15-man Free Hit squads with budget optimization and haul-factor captaincy
+- **Chip Strategy (2025/26)**: Plans optimal usage of 8 chips (2 sets) with fixture analysis and urgency tracking
 - **Competition Detection**: Data-driven identification of backup players and rotation risks
 - **Recent Transfer Detection**: Web scraping to adjust for new signings
 - **New Player Adjustments**: Smart handling of players with limited data to avoid harsh penalties
-- **Chip Strategy**: Plans optimal usage of chips with 2025/26 double chips system
 - **Automated Pipeline**: Fully integrated data update, training, and post-processing
 
 ## Quick Start
@@ -31,6 +33,11 @@ fpl transfers optimize --use-lp --horizon 5 --bench-budget 180
 # Get transfer recommendations for existing team
 fpl myteam sync --entry YOUR_TEAM_ID
 fpl transfers recommend --consider-hits
+
+# Chip strategy and Free Hit planning
+fpl chips plan-2025 --use-myteam              # See when to use chips
+fpl chips free-hit --gw 9                     # Generate optimal Free Hit team
+fpl chips free-hit-analysis                   # Compare all gameweeks
 ```
 
 ## Installation
@@ -149,16 +156,65 @@ fpl myteam prices    # Check if any players changed price
 ### Chip Strategy Commands
 
 #### `fpl chips plan-2025`
-Plans optimal chip usage for 2025/26 season with double chips system.
+Plans optimal chip usage for 2025/26 season with double chips system (8 total chips).
+
+Features:
+- **H1 Planning (GW1-19)**: Use-it-or-lose-it chips with urgency tracking
+- **H2 Planning (GW20-38)**: DGW/BGW predictions for optimal timing
+- **Fixture-Based Analysis**: Per-gameweek EP predictions using FDR and venue
+- **Personalized Recommendations**: Based on your actual squad
+- **Haul Factor Captaincy**: Prioritizes high-ceiling players for Triple Captain
 
 Options:
-- `--use-myteam`: Base recommendations on your current team
-- `--explain`: Show detailed reasoning
+- `--use-myteam`: Base recommendations on your synced team (default: True)
+- `--explain`: Show detailed reasoning (default: True)
+- `--show-teams`: Display full Free Hit XI for recommended gameweeks
 
 Examples:
 ```bash
-fpl chips plan-2025                   # General chip strategy
-fpl chips plan-2025 --use-myteam      # Personalized for your team
+fpl chips plan-2025                        # General chip strategy
+fpl chips plan-2025 --use-myteam           # Personalized for your team
+fpl chips plan-2025 --show-teams           # Include Free Hit team previews
+```
+
+#### `fpl chips free-hit`
+Generates optimal Free Hit team for a specific gameweek.
+
+Features:
+- **15-Man Squad**: Full starting XI + 4-player bench
+- **Budget Optimization**: Uses your actual squad selling value
+- **Upgrade Logic**: Maximizes squad quality (no wasted funds)
+- **Smart Captaincy**: Captain + vice-captain using haul factor (prioritizes attackers)
+- **All FPL Constraints**: 2 GKP, 5 DEF, 5 MID, 3 FWD, max 3 per club
+- **Fixture-Aware**: EP predictions based on opponent difficulty and venue
+
+Options:
+- `--gw N`: Gameweek to generate team for (required)
+
+Examples:
+```bash
+fpl chips free-hit --gw 9              # Generate Free Hit team for GW9
+fpl chips free-hit --gw 19             # H1 deadline week team
+```
+
+#### `fpl chips free-hit-analysis`
+Analyzes Free Hit value across multiple gameweeks.
+
+Features:
+- **EP Comparison**: Your XI vs optimal XI for each gameweek
+- **Delta Calculation**: Shows point gain for each week
+- **Worth It Assessment**: Recommends if FH is worth using (≥6 point threshold)
+- **Best Week Identification**: Highlights optimal Free Hit gameweek
+
+Options:
+- `--gw-start N`: Starting gameweek (default: current GW)
+- `--gw-end N`: Ending gameweek (default: 19)
+
+Examples:
+```bash
+fpl chips free-hit-analysis                    # Analyze current GW to GW19
+fpl chips free-hit-analysis --gw-start 8       # Start from GW8
+fpl chips free-hit-analysis --gw-end 12        # Short-term analysis
 ```
 
 ### Authentication Commands
@@ -322,8 +378,23 @@ The system uses cross-validation to evaluate models:
 
 ## Recent Updates
 
+### Free Hit Team Generator (New!)
+- **Complete 15-Man Squads**: Generates full starting XI + bench with legal formations
+- **Budget Optimization**: Uses your actual squad selling value (not hardcoded £100m)
+- **Upgrade Algorithm**: Iteratively improves squad to maximize quality with remaining budget
+- **Smart Captaincy**: Recommends captain + vice-captain using haul factor
+  - Prioritizes high-ceiling players (FWD 1.8x, MID 1.5x, DEF 0.9x, GKP 0.6x)
+- **Fixture Analysis**: Compare Free Hit value across all gameweeks with EP deltas
+
+### Chip Strategy Improvements
+- **2025/26 Double Chips**: Plans optimal usage of 8 chips (2 sets of TC/BB/FH/WC)
+- **Fixture-Based EP**: Per-gameweek predictions using FDR and home/away adjustments
+- **Urgency Tracking**: H1 chips (GW1-19) have deadline pressure, H2 saved for DGWs
+- **FDR Bug Fix**: Corrected inverted FDR multiplier (low FDR now correctly = easier fixture)
+- **Personalized Analysis**: Based on your actual owned players, not generic top scorers
+
 ### Transfer Recommender Enhancements
-- **Lineup Optimization**: Now recommends optimal starting XI with captain/vice-captain
+- **Lineup Optimization**: Recommends optimal starting XI with captain/vice-captain
 - **Banking Strategy**: Compares making transfers now vs banking for next week
 - **FPL 5 FT Cap**: Updated to reflect FPL's current 5 free transfer maximum (was 2)
 - **New Player Adjustments**: Smart handling of players with limited data (<180 mins)
@@ -334,6 +405,7 @@ The system automatically handles:
 - Backup goalkeepers and rotation risks
 - New signings who need time to settle
 - Banking decisions for up to 5 free transfers
+- Max 3 players per club constraint in all optimizations
 
 ## Configuration
 
@@ -370,6 +442,17 @@ ALLOW_ODDS_FALLBACK=true         # Use odds data if available
 - Ensure models trained successfully first
 - Check bench budget is reasonable (150-200 = £15-20m)
 - Verify no impossible constraints (e.g., excluding too many players)
+
+### Free Hit Team Generator Issues
+- **"No valid formation found"**: Usually due to budget constraints or missing fixture data
+  - Run `fpl update --run` to ensure latest data
+  - Check your squad value with `fpl myteam sync --entry YOUR_ID`
+- **Budget seems wrong**: Free Hit uses your squad's selling value (not buying price)
+  - Selling value = what you'd get if you sold all players now
+  - Check `data/processed/myteam_latest.json` for selling prices
+- **Team seems suboptimal**: Analysis uses fixture-based EP predictions
+  - EP varies by opponent and home/away status
+  - Use `fpl chips free-hit-analysis` to see EP for each gameweek
 
 ## License
 

@@ -14,29 +14,95 @@ log = get_logger(__name__)
 def load_current_team(entry_id: Optional[int] = None) -> tuple[List[int], Dict[str, Any]]:
     """
     Load current team from myteam snapshot.
-    
+
     Returns tuple of (player_ids, team_info) where team_info contains transfers data.
     """
     myteam_file = Path("data/processed/myteam_latest.json")
-    
+
     if not myteam_file.exists():
         raise FileNotFoundError(
             "No team data found. Run 'fpl myteam sync --entry YOUR_ID' first to download your current team."
         )
-    
+
     with open(myteam_file) as f:
         data = json.load(f)
-    
+
     # Extract player IDs from picks
     player_ids = [pick["element"] for pick in data.get("picks", [])]
-    
+
     if len(player_ids) != 15:
         log.warning(f"Expected 15 players but found {len(player_ids)}")
-    
+
     # Extract transfer info
     transfer_info = data.get("transfers", {})
-    
+
     return player_ids, transfer_info
+
+
+def match_transfers_by_position(transfers_out, transfers_in, bootstrap_data: Dict) -> List[Dict]:
+    """
+    Match transfers OUT and IN by position so each pair is the same position.
+
+    Args:
+        transfers_out: List of player IDs or Player objects being transferred out
+        transfers_in: List of player IDs or Player objects being transferred in
+        bootstrap_data: FPL bootstrap data with player info
+
+    Returns:
+        List of dicts with 'out' and 'in' keys, matched by position
+    """
+    from ..data.fpl_api import get_bootstrap
+
+    if not bootstrap_data:
+        bootstrap_data = get_bootstrap()
+
+    players_map = {p["id"]: p for p in bootstrap_data["elements"]}
+
+    # Convert Player objects to IDs if needed
+    def get_id(p):
+        if hasattr(p, 'id'):
+            return p.id  # Player object
+        elif isinstance(p, dict) and 'id' in p:
+            return p['id']  # Dict
+        else:
+            return p  # Already an ID
+
+    def get_pos_from_id(pid):
+        player = players_map.get(pid)
+        if player:
+            return ["GKP", "DEF", "MID", "FWD"][player["element_type"] - 1]
+        return None
+
+    # Group by position
+    out_by_pos = {"GKP": [], "DEF": [], "MID": [], "FWD": []}
+    in_by_pos = {"GKP": [], "DEF": [], "MID": [], "FWD": []}
+
+    for p in transfers_out:
+        pid = get_id(p)
+        pos = get_pos_from_id(pid)
+        if pos:
+            out_by_pos[pos].append(pid)
+
+    for p in transfers_in:
+        pid = get_id(p)
+        pos = get_pos_from_id(pid)
+        if pos:
+            in_by_pos[pos].append(pid)
+
+    # Match by position
+    matched_changes = []
+    for pos in ["GKP", "DEF", "MID", "FWD"]:
+        out_pids = out_by_pos[pos]
+        in_pids = in_by_pos[pos]
+
+        # Pair up players in this position
+        for i in range(min(len(out_pids), len(in_pids))):
+            matched_changes.append({
+                "out": out_pids[i],
+                "in": in_pids[i]
+            })
+
+    return matched_changes
 
 
 def recommend_weekly_transfers(
@@ -119,16 +185,19 @@ def recommend_weekly_transfers(
             **opt_params
         )
         if "error" not in result:
+            # Load bootstrap data for position matching
+            from ..data.fpl_api import get_bootstrap
+            bootstrap = get_bootstrap()
+
             # Handle two-stage optimization result structure
             if "transfers_out" in result and "transfers_in" in result:
                 # Two-stage optimization returns transfers directly
-                changes = []
-                for i, pid_out in enumerate(result["transfers_out"]):
-                    if i < len(result["transfers_in"]):
-                        changes.append({
-                            "out": pid_out,
-                            "in": result["transfers_in"][i]
-                        })
+                # Match transfers by position so each pair makes sense
+                changes = match_transfers_by_position(
+                    result["transfers_out"],
+                    result["transfers_in"],
+                    bootstrap
+                )
                 squad_ids = result.get("squad", [p["id"] for p in result.get("squad", [])])
             else:
                 # Regular optimization returns squad
@@ -177,8 +246,23 @@ def recommend_weekly_transfers(
                 **opt_params
             )
             if "error" not in result:
-                squad_ids = [p["id"] for p in result.get("squad", [])]
-                changes = identify_changes(current_squad, squad_ids)
+                # Load bootstrap data for position matching
+                from ..data.fpl_api import get_bootstrap
+                bootstrap = get_bootstrap()
+
+                # Handle two-stage optimization results
+                if "transfers_out" in result and "transfers_in" in result:
+                    # Match transfers by position
+                    changes = match_transfers_by_position(
+                        result["transfers_out"],
+                        result["transfers_in"],
+                        bootstrap
+                    )
+                    squad_ids = result.get("squad", [p["id"] for p in result.get("squad", [])])
+                else:
+                    # Regular optimization
+                    squad_ids = [p["id"] for p in result.get("squad", [])]
+                    changes = identify_changes(current_squad, squad_ids)
                 
                 # Calculate EP gain if available
                 ep_gain = None
@@ -193,6 +277,10 @@ def recommend_weekly_transfers(
                     continue
                 
                 expected_pts = result.get("expected_points_total", 0)
+                # Skip if optimization failed or returned invalid points
+                if expected_pts <= 0:
+                    log.info(f"Skipping {num_transfers} transfers with hit - optimization returned no valid points")
+                    continue
                 scenarios.append({
                     "transfers": num_transfers,
                     "cost": hit_cost,
@@ -200,7 +288,8 @@ def recommend_weekly_transfers(
                     "net_points": expected_pts - hit_cost,
                     "squad": squad_ids,
                     "changes": changes,
-                    "description": f"{num_transfers} transfers (-{hit_cost} hit)"
+                    "description": f"{num_transfers} transfers (-{hit_cost} hit)",
+                    "full_result": result  # Store full result for lineup details
                 })
     
     # Evaluate banking strategy if requested and we have less than 5 free transfers (FPL cap)
@@ -213,16 +302,16 @@ def recommend_weekly_transfers(
         current_ft_scenarios = [s for s in scenarios if s["transfers"] <= free_transfers and s["cost"] == 0]
         best_current = max(current_ft_scenarios, key=lambda x: x["net_points"]) if current_ft_scenarios else None
         
-        # Calculate actual EP gain for current best option
+        # Calculate actual EP gain for current best option (improvement over baseline)
         current_best_ep_gain = 0
-        if best_current and "full_result" in best_current:
-            if "optimization_score" in best_current["full_result"]:
-                current_best_ep_gain = best_current["full_result"]["optimization_score"]
-            elif best_current["transfers"] > 0:
-                # Get baseline (no transfer) scenario
-                baseline_scenario = next((s for s in scenarios if s["transfers"] == 0), None)
-                if baseline_scenario:
-                    current_best_ep_gain = best_current["net_points"] - baseline_scenario["net_points"]
+        if best_current:
+            # ALWAYS calculate as improvement over baseline, not absolute score
+            baseline_scenario = next((s for s in scenarios if s["transfers"] == 0), None)
+            if baseline_scenario:
+                current_best_ep_gain = best_current["net_points"] - baseline_scenario["net_points"]
+            elif best_current["transfers"] > 0 and "full_result" in best_current:
+                # Fallback: if no baseline, try to use objective_improvement if available
+                current_best_ep_gain = best_current["full_result"].get("objective_improvement", 0)
         
         # Simulate having more free transfers next week if we bank
         log.info(f"Simulating {next_week_ft} free transfers for banking comparison")
@@ -234,16 +323,19 @@ def recommend_weekly_transfers(
         )
         
         if "error" not in banked_result:
+            # Load bootstrap data for position matching
+            from ..data.fpl_api import get_bootstrap
+            bootstrap = get_bootstrap()
+
             # Handle two-stage optimization results
             if "transfers_out" in banked_result and "transfers_in" in banked_result:
                 # Two-stage optimization returns transfers directly
-                banked_changes = []
-                for i, pid_out in enumerate(banked_result["transfers_out"]):
-                    if i < len(banked_result["transfers_in"]):
-                        banked_changes.append({
-                            "out": pid_out,
-                            "in": banked_result["transfers_in"][i]
-                        })
+                # Match transfers by position so each pair makes sense
+                banked_changes = match_transfers_by_position(
+                    banked_result["transfers_out"],
+                    banked_result["transfers_in"],
+                    bootstrap
+                )
                 banked_squad_ids = banked_result.get("squad", [])
             else:
                 # Regular optimization returns squad
@@ -386,27 +478,48 @@ def recommend_weekly_transfers(
     if scenarios:
         best_scenario = max(scenarios, key=lambda x: x["net_points"])
         baseline_points = scenarios[0]["net_points"] if scenarios else 0  # No transfer baseline
-        
-        # Extract lineup details from the full optimization result
-        full_result = best_scenario.get("full_result", {})
-        
-        # Get actual EP gain from optimization score if available
-        ep_gain = 0
-        if "full_result" in best_scenario:
-            full_result = best_scenario["full_result"]
-            if "optimization_score" in full_result:
-                ep_gain = full_result["optimization_score"]
+        baseline_scenario = scenarios[0] if scenarios else None  # Hold scenario
+
+        # Decide what to actually recommend
+        recommended_scenario = best_scenario
+
+        # Check if banking was evaluated and recommends banking
+        if banking_analysis and "decision" in banking_analysis:
+            if banking_analysis["decision"].get("should_bank", False):
+                # Banking recommended - use the hold scenario (current squad)
+                recommended_scenario = baseline_scenario
+                log.info("Banking recommended - using current squad lineup")
+        else:
+            # No banking recommendation, check if transfers are worth making
+            if best_scenario["transfers"] > free_transfers:
+                # Taking a hit - be stricter
+                net_gain = best_scenario["net_points"] - baseline_points
+                if net_gain < 4.0:  # Less than 4 points for a hit, not worth it
+                    recommended_scenario = baseline_scenario
             elif best_scenario["transfers"] > 0:
-                # Fallback: use net points difference only if transfers were made
-                ep_gain = best_scenario["net_points"] - baseline_points
-        
+                # Free transfers - still check if worthwhile
+                net_gain = best_scenario["net_points"] - baseline_points
+                if net_gain < 1.0:  # Less than 1 point gain, just hold
+                    recommended_scenario = baseline_scenario
+
+        # Use the lineup from the scenario we're actually recommending
+        full_result = recommended_scenario.get("full_result", {})
+
+        # Get actual EP gain (improvement over baseline, NOT absolute score)
+        ep_gain = 0
+        if recommended_scenario["transfers"] > 0 and baseline_scenario:
+            # Calculate as improvement: new EP - baseline EP
+            ep_gain = recommended_scenario["expected_points"] - baseline_scenario["expected_points"]
+            # Note: ep_gain is the raw points gain before considering hit costs
+            # The net gain after hits is shown in the scenario analysis
+
         # Add names to changes
         from ..data.fpl_api import get_bootstrap
         bootstrap = get_bootstrap()
         players_map = {p["id"]: p for p in bootstrap["elements"]}
-        
+
         enhanced_changes = []
-        for change in best_scenario["changes"]:
+        for change in recommended_scenario["changes"]:
             p_out = players_map.get(change["out"], {})
             p_in = players_map.get(change["in"], {})
             enhanced_changes.append({
@@ -417,22 +530,59 @@ def recommend_weekly_transfers(
                 "out_price": p_out.get("now_cost", 0),
                 "in_price": p_in.get("now_cost", 0)
             })
-        
+
+        # Build human-readable output with clear transfer section
+        output_lines = []
+
+        # Header with transfer count
+        if recommended_scenario["transfers"] > 0:
+            output_lines.append("=" * 60)
+            output_lines.append(f"RECOMMENDED TRANSFERS: {recommended_scenario['transfers']}")
+            output_lines.append("=" * 60)
+            output_lines.append("")
+
+            # Show transfers clearly
+            for i, change in enumerate(enhanced_changes, 1):
+                out_name = change["out_name"]
+                in_name = change["in_name"]
+                out_price = change["out_price"] / 10
+                in_price = change["in_price"] / 10
+                diff = (change["in_price"] - change["out_price"]) / 10
+                diff_str = f"(+£{diff:.1f}m)" if diff > 0 else f"(£{diff:.1f}m)" if diff < 0 else ""
+
+                output_lines.append(f"{i}. OUT: {out_name} (£{out_price:.1f}m)")
+                output_lines.append(f"   IN:  {in_name} (£{in_price:.1f}m) {diff_str}")
+                output_lines.append("")
+
+            # Show EP gain
+            if ep_gain > 0:
+                output_lines.append(f"Expected points gain: +{ep_gain:.1f} over {planning_horizon} gameweeks")
+            if recommended_scenario["cost"] > 0:
+                output_lines.append(f"Hit cost: -{recommended_scenario['cost']} points")
+                net_gain = ep_gain - recommended_scenario['cost']
+                output_lines.append(f"Net gain: {net_gain:+.1f} points")
+            output_lines.append("")
+
+        # Add the squad/lineup details from optimizer
+        squad_output = full_result.get("human_readable", "")
+        if squad_output:
+            output_lines.append(squad_output)
+
         # Format recommendation
         recommendation = {
-            "recommended_transfers": best_scenario["transfers"],
-            "transfer_cost": best_scenario["cost"],
+            "recommended_transfers": recommended_scenario["transfers"],
+            "transfer_cost": recommended_scenario["cost"],
             "expected_gain": ep_gain,
             "changes": enhanced_changes,
             "scenarios": scenarios,
             "current_squad": current_squad,
-            "new_squad": best_scenario["squad"],
+            "new_squad": recommended_scenario["squad"],
             "planning_horizon": planning_horizon,
             "free_transfers": free_transfers,
             "bank": bank,
-            # Add lineup details from optimization result
+            # Add lineup details from the RECOMMENDED scenario, not necessarily the best
             "optimization_result": full_result,
-            "human_readable": full_result.get("human_readable", ""),
+            "human_readable": "\n".join(output_lines),
             "banking_analysis": banking_analysis
         }
         
@@ -442,21 +592,19 @@ def recommend_weekly_transfers(
 
 
 def identify_changes(current_squad: List[int], new_squad: List[int]) -> List[Dict[str, Any]]:
-    """Identify transfers between two squads."""
+    """Identify transfers between two squads, matched by position."""
     current_set = set(current_squad)
     new_set = set(new_squad)
-    
+
     transfers_out = list(current_set - new_set)
     transfers_in = list(new_set - current_set)
-    
-    changes = []
-    for i, pid_out in enumerate(transfers_out):
-        if i < len(transfers_in):
-            changes.append({
-                "out": pid_out,
-                "in": transfers_in[i]
-            })
-    
+
+    # Match transfers by position so each pair is the same position
+    from ..data.fpl_api import get_bootstrap
+    bootstrap = get_bootstrap()
+
+    changes = match_transfers_by_position(transfers_out, transfers_in, bootstrap)
+
     return changes
 
 
@@ -581,7 +729,12 @@ def format_recommendation_output(recommendation: Dict[str, Any]) -> str:
         output.append(f"\n📊 Recommended: {rec_transfers} transfer{'s' if rec_transfers > 1 else ''}")
         if cost > 0:
             output.append(f"Hit cost: -{cost} points")
-        output.append(f"Expected net gain over next {horizon} GWs: +{expected_gain:.1f} points")
+        # Show net gain after accounting for hit cost
+        net_gain = expected_gain - cost
+        if net_gain > 0:
+            output.append(f"Expected net gain over next {horizon} GWs: +{net_gain:.1f} points")
+        else:
+            output.append(f"Expected net gain over next {horizon} GWs: {net_gain:.1f} points")
         
         # Show specific transfers
         output.append("\n" + "-" * 40)
@@ -598,6 +751,42 @@ def format_recommendation_output(recommendation: Dict[str, Any]) -> str:
             output.append(f"OUT: {out_name} ({out_team})")
             output.append(f" IN: {in_name} ({in_team})")
             output.append("")
+    
+    # Show proposed lineup
+    if "human_readable" in recommendation and recommendation["human_readable"]:
+        hr = recommendation["human_readable"]
+        if "OPTIMAL LINEUP" in hr:
+            output.append("\n" + "-" * 40)
+            # Show appropriate title based on recommendation
+            if recommendation["recommended_transfers"] == 0:
+                # Check if this is due to banking
+                if "banking_analysis" in recommendation and recommendation["banking_analysis"]:
+                    if recommendation["banking_analysis"].get("decision", {}).get("should_bank", False):
+                        output.append("CURRENT LINEUP (BANKING TRANSFER):")
+                    else:
+                        output.append("CURRENT LINEUP (OPTIMIZED):")
+                else:
+                    output.append("CURRENT LINEUP (OPTIMIZED):")
+            else:
+                output.append("PROPOSED LINEUP AFTER TRANSFERS:")
+            
+            # Extract the lineup section from human_readable
+            lines = hr.split('\n')
+            in_lineup = False
+            lineup_lines = []
+            
+            for line in lines:
+                if "OPTIMAL LINEUP" in line:
+                    in_lineup = True
+                    lineup_lines.append(line.replace("=== ", "").replace(" ===", ""))
+                elif in_lineup:
+                    lineup_lines.append(line)
+                    if "Vice-Captain:" in line:
+                        break
+            
+            # Add the lineup to output
+            for line in lineup_lines:
+                output.append(line)
     
     # Banking decision (if evaluated)
     if "banking_analysis" in recommendation and recommendation["banking_analysis"]:
