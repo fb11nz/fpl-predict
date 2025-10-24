@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: fpl-predict
-Version: 0.2.0
+Version: 0.3.0
 Summary: FPL player-points prediction & transfer advisor
 Author: FPL Predict
 Requires-Python: >=3.11

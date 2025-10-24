@@ -277,6 +277,8 @@ def transfers_recommend(entry: int | None, max_transfers: int, horizon: int, con
               help="Penalty for injury/rotation risk.")
 @click.option("--value-weight", type=float, default=0.3, show_default=True,
               help="Weight for value (points per million) in objective.")
+@click.option("--wildcard/--no-wildcard", default=False, show_default=True,
+              help="Use wildcard chip (all players at current market price).")
 def transfers_optimize_cmd(
     use_myteam: bool,
     horizon: int,
@@ -300,6 +302,7 @@ def transfers_optimize_cmd(
     differential_bonus: float,
     risk_penalty: float,
     value_weight: float,
+    wildcard: bool,
 ) -> None:
     """Suggest a 15-man squad + XI (and captain/vice) under budget/constraints."""
     plan = optimize_transfers(
@@ -325,6 +328,7 @@ def transfers_optimize_cmd(
         differential_bonus=differential_bonus,
         risk_penalty=risk_penalty,
         value_weight=value_weight,
+        wildcard=wildcard,
     )
 
     click.echo(plan.get("human_readable", "No plan generated."))
@@ -390,21 +394,48 @@ def chips_plan_cmd(
     help="Make recommendations based on your synced squad (fpl myteam sync).",
 )
 @click.option("--explain/--no-explain", default=True, show_default=True, help="Show detailed strategy explanation.")
+@click.option("--show-teams", is_flag=True, default=False, help="Show full Free Hit team for recommended gameweeks.")
 def chips_plan_2025_cmd(
     use_myteam: bool,
     explain: bool,
+    show_teams: bool,
 ) -> None:
     """Plan chips using 2025/26 double chips system (8 total chips)"""
     from .strategy.chips_2025_final import plan_chips_2025
-    
+
     click.echo("📌 FPL 2025/26 Double Chips Strategy")
     click.echo("Using new rules: 2 sets of chips (H1 expires GW19, H2 starts GW20)")
     click.echo("")
-    
+
     plan_chips_2025(
         use_myteam=use_myteam,
         explain=explain,
+        show_teams=show_teams,
     )
+
+
+@chips_group.command("free-hit")
+@click.option("--gw", type=int, required=True, help="Gameweek to generate Free Hit team for")
+def chips_free_hit_cmd(gw: int) -> None:
+    """Generate optimal Free Hit XI for a specific gameweek"""
+    from .strategy.chips_2025_final import generate_free_hit_team
+
+    click.echo(f"Generating optimal Free Hit team for GW{gw}...")
+    click.echo("")
+
+    result = generate_free_hit_team(gw)
+    click.echo(result)
+
+
+@chips_group.command("free-hit-analysis")
+@click.option("--gw-start", type=int, default=None, help="Starting gameweek (defaults to current GW)")
+@click.option("--gw-end", type=int, default=19, show_default=True, help="Ending gameweek")
+def chips_free_hit_analysis_cmd(gw_start: int, gw_end: int) -> None:
+    """Analyze Free Hit value across all gameweeks"""
+    from .strategy.chips_2025_final import analyze_free_hit_all_gws
+
+    result = analyze_free_hit_all_gws(gw_start, gw_end)
+    click.echo(result)
 
 
 if __name__ == "__main__":
