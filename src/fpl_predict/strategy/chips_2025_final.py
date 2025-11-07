@@ -114,6 +114,9 @@ class FPL2025ChipStrategy:
         owned_ids = self._load_myteam() if use_myteam else set()
         player_data = self._load_player_data()
 
+        # Get already used chips
+        used_chips = self._get_used_chips() if use_myteam else set()
+
         recommendations = {}
 
         # Plan H1 chips if still in first half
@@ -133,8 +136,15 @@ class FPL2025ChipStrategy:
         )
         recommendations.update(h2_recs)
 
+        # Filter out chips that have already been used
+        recommendations = {
+            chip_key: rec
+            for chip_key, rec in recommendations.items()
+            if chip_key not in used_chips
+        }
+
         if explain:
-            self._explain_strategy(recommendations, current_gw, show_teams=show_teams)
+            self._explain_strategy(recommendations, current_gw, show_teams=show_teams, used_chips=used_chips)
 
         return recommendations
     
@@ -415,6 +425,39 @@ class FPL2025ChipStrategy:
             return total_value if total_value > 0 else 100.0  # Default to £100m if no data
         except:
             return 100.0  # Default to £100m if no team data
+
+    def _get_used_chips(self) -> Set[str]:
+        """Get chips that have already been played this season
+
+        Returns set of chip names that are played, e.g., {'H1_WC', 'H1_FH'}
+        """
+        try:
+            with open(PROC / "myteam_latest.json", "r") as f:
+                data = json.load(f)
+            chips = data.get("chips", [])
+
+            used_chips = set()
+            for chip in chips:
+                if chip.get("status_for_entry") == "played":
+                    name = chip.get("name")
+                    # Map API chip names to our internal names
+                    # Check if it's H1 or H2 based on start_event
+                    start_event = chip.get("start_event", 1)
+                    half = "H1" if start_event < 20 else "H2"
+
+                    if name == "wildcard":
+                        used_chips.add(f"{half}_WC")
+                    elif name == "freehit":
+                        used_chips.add(f"{half}_FH")
+                    elif name == "bboost":
+                        used_chips.add(f"{half}_BB")
+                    elif name == "3xc":
+                        used_chips.add(f"{half}_TC")
+
+            return used_chips
+        except Exception as e:
+            log.warning(f"Could not load used chips: {e}")
+            return set()
     
     def _load_player_data(self) -> pd.DataFrame:
         """Load player EP data"""
@@ -1221,8 +1264,11 @@ class FPL2025ChipStrategy:
             return max(28, dgws[0] - 2)
         return 30
     
-    def _explain_strategy(self, recommendations: Dict, current_gw: int, show_teams: bool = False):
+    def _explain_strategy(self, recommendations: Dict, current_gw: int, show_teams: bool = False, used_chips: Set[str] = None):
         """Explain the strategy to user"""
+
+        if used_chips is None:
+            used_chips = set()
 
         print("\n" + "=" * 70)
         print("FPL 2025/26 CHIP STRATEGY - DOUBLE CHIPS SYSTEM")
@@ -1232,15 +1278,29 @@ class FPL2025ChipStrategy:
         print(f"⏰ H1 Deadline: GW19 (30 Dec)")
         print(f"🔄 H2 Starts: GW20")
 
+        # Show used chips if any
+        if used_chips:
+            h1_used = [c for c in used_chips if c.startswith('H1_')]
+            h2_used = [c for c in used_chips if c.startswith('H2_')]
+
+            if h1_used:
+                chip_names = [c.replace('H1_', '') for c in h1_used]
+                print(f"\n✅ H1 Chips Already Used: {', '.join(chip_names)}")
+            if h2_used:
+                chip_names = [c.replace('H2_', '') for c in h2_used]
+                print(f"✅ H2 Chips Already Used: {', '.join(chip_names)}")
+
         # Separate by half
         h1_chips = {k: v for k, v in recommendations.items() if 'H1_' in k}
         h2_chips = {k: v for k, v in recommendations.items() if 'H2_' in k}
 
         if current_gw <= 19:
             remaining = 19 - current_gw + 1
-            print(f"\n⚠️  {remaining} gameweeks left to use H1 chips!")
+            h1_used_count = len([c for c in used_chips if c.startswith('H1_')])
+            remaining_chips = 4 - h1_used_count
+            print(f"\n⚠️  {remaining} gameweeks left to use {remaining_chips} H1 chips!")
 
-            if remaining <= 3:
+            if remaining <= 3 and remaining_chips > 0:
                 print("🚨 URGENT: Use your H1 chips NOW or lose them!")
 
         print("\n" + "-" * 35 + " FIRST HALF " + "-" * 35)
@@ -1250,8 +1310,12 @@ class FPL2025ChipStrategy:
             self._print_chip_recommendation(rec)
 
         if not h1_chips and current_gw <= 19:
-            print("⚠️ No specific recommendations yet - monitor your team performance")
-            print("💡 Consider using chips around GW15-18 to avoid losing them")
+            h1_used_count = len([c for c in used_chips if c.startswith('H1_')])
+            if h1_used_count == 4:
+                print("✅ All H1 chips have been used!")
+            else:
+                print("⚠️ No specific recommendations yet - monitor your team performance")
+                print("💡 Consider using chips around GW15-18 to avoid losing them")
 
         # Show H1 Free Hit team if requested
         if show_teams:
