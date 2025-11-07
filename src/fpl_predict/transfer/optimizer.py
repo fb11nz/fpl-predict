@@ -747,10 +747,12 @@ def evaluate_transfer_with_optimal_xi(
     
     # Variables: who is in XI
     xi_vars = {p.id: pulp.LpVariable(f"xi_{p.id}", cat="Binary") for p in squad_players}
-    
-    # Objective: maximize EP (XI gets full, bench gets bench_weight)
+
+    # Objective: maximize EP (XI gets full, bench gets bench_weight + xmins bonus)
+    # Bench players get bonus for having high xMins (important for Bench Boost)
+    bench_xmins_weight = 0.5  # Weight for xMins on bench (0.5 means 45 xMins = +0.25 pts)
     prob += pulp.lpSum([
-        xi_vars[p.id] * p.eph + (1 - xi_vars[p.id]) * p.eph * bench_weight
+        xi_vars[p.id] * p.eph + (1 - xi_vars[p.id]) * (p.eph * bench_weight + bench_xmins_weight * (p.xmins / 90.0))
         for p in squad_players
     ])
     
@@ -1108,10 +1110,12 @@ def optimize_transfers_two_stage(
         # Optimize XI for this squad
         prob = pulp.LpProblem("XI_Selection", pulp.LpMaximize)
         xi_vars = {p.id: pulp.LpVariable(f"xi_{p.id}", cat="Binary") for p in squad_players}
-        
-        # Objective: maximize EP
+
+        # Objective: maximize EP (XI gets full, bench gets bench_weight + xmins bonus)
+        # Bench players get bonus for having high xMins (important for Bench Boost)
+        bench_xmins_weight = 0.5  # Weight for xMins on bench
         prob += pulp.lpSum([
-            xi_vars[p.id] * p.eph + (1 - xi_vars[p.id]) * p.eph * bench_weight
+            xi_vars[p.id] * p.eph + (1 - xi_vars[p.id]) * (p.eph * bench_weight + bench_xmins_weight * (p.xmins / 90.0))
             for p in squad_players
         ])
         
