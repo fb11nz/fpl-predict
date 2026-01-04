@@ -259,10 +259,17 @@ class FPL2025ChipStrategy:
             remaining_gws = [gw for gw in range(current_gw, self.h1_deadline + 1) 
                            if gw not in occupied_gws]
             
+            # Map short codes to full enum names
+            chip_name_map = {
+                'TC': 'TRIPLE_CAPTAIN',
+                'BB': 'BENCH_BOOST',
+                'FH': 'FREE_HIT',
+                'WC': 'WILDCARD'
+            }
             for chip_key in ['TC', 'BB', 'FH', 'WC']:
                 if not chips_assigned[chip_key] and remaining_gws:
                     gw = remaining_gws.pop(0)
-                    chip_type = getattr(ChipType, f'H1_{chip_key}')
+                    chip_type = getattr(ChipType, f'H1_{chip_name_map[chip_key]}')
                     recs[chip_type.value] = ChipRecommendation(
                         chip_type=chip_type,
                         gameweek=gw,

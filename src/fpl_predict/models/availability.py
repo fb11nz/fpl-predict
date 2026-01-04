@@ -40,18 +40,20 @@ def apply_availability_adjustments(
     # Create player status mapping
     status_map = {}
     chance_map = {}
-    
+    news_map = {}
+
     for player in bootstrap_data['elements']:
         player_id = player['id']
-        status = player.get('status', 'a')  # a=available, i=injured, d=doubtful, s=suspended, u=unavailable
+        status = player.get('status', 'a')  # a=available, i=injured, d=doubtful, s=suspended, u=unavailable, n=not available
         chance = player.get('chance_of_playing_this_round')
         news = player.get('news', '')
-        
+
         status_map[player_id] = status
         chance_map[player_id] = chance
-        
+        news_map[player_id] = news.lower()
+
         # Log important cases
-        if status in ['i', 's', 'u']:
+        if status in ['i', 's', 'u', 'n']:
             log.info(f"Player {player['web_name']} (ID {player_id}) is unavailable: status={status}, news={news[:50]}")
     
     # Apply adjustments
@@ -70,19 +72,36 @@ def apply_availability_adjustments(
         # Handle completely unavailable players
         if zero_unavailable:
             should_zero = False
-            
-            # Injured with 0% chance
-            if status == 'i' and (chance == 0 or pd.isna(chance)):
-                should_zero = True
-                
+
+            # Get news text for additional checks
+            news = news_map.get(player_id, '')
+
+            # Check for indicators of long-term unavailability
+            unknown_return = 'unknown return' in news
+            afcon = 'africa cup of nations' in news or 'afcon' in news
+
+            # Injured players
+            if status == 'i':
+                # Zero if: chance is 0/None OR news says unknown return date
+                if chance == 0 or pd.isna(chance) or unknown_return:
+                    should_zero = True
+
             # Suspended
             elif status == 's':
-                should_zero = True
-                
+                # Zero if: chance is 0/None OR news says unknown return
+                if chance == 0 or pd.isna(chance) or unknown_return:
+                    should_zero = True
+
             # Left the league / unavailable
             elif status == 'u':
                 should_zero = True
-                
+
+            # Not available (international duty, ineligible, etc.)
+            elif status == 'n':
+                # Zero if: AFCON (long tournament), unknown return, or low chance
+                if afcon or unknown_return or chance == 0 or pd.isna(chance):
+                    should_zero = True
+
             if should_zero:
                 # Zero out all predictions
                 if 'xmins' in adjusted.columns:
