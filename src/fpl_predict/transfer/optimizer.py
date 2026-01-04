@@ -792,21 +792,34 @@ def optimize_transfers_two_stage(
     3. Select the best transfer combination
     """
     log.info(f"Starting two-stage transfer optimization for {max_transfers} transfer(s)")
-    
+
     # Get current squad players
     current_players = [p for p in players if p.id in current_squad]
-    
-    # Calculate current budget (selling prices)
+
+    # Identify dead players (EP=0 or xmins=0) - these should be prioritized for transfer out
+    dead_player_ids = set()
+    for p in current_players:
+        if p.ep_base == 0 or p.xmins == 0:
+            dead_player_ids.add(p.id)
+            log.info(f"Dead player identified: {p.name} (ID={p.id}, EP={p.ep_base:.2f}, xMins={p.xmins:.0f})")
+
+    if dead_player_ids:
+        log.info(f"Found {len(dead_player_ids)} dead player(s) to prioritize for transfer out")
+
+    # Calculate current budget (selling prices + bank)
     import json
     import os
     selling_prices = {}
+    bank = 0
     myteam_file = "data/processed/myteam_latest.json"
     if os.path.exists(myteam_file):
         with open(myteam_file) as f:
             myteam_data = json.load(f)
         for pick in myteam_data.get("picks", []):
             selling_prices[pick["element"]] = pick.get("selling_price", pick.get("purchase_price", 0))
-    
+        bank = myteam_data.get("transfers", {}).get("bank", 0)
+        log.info(f"Bank available: £{bank/10:.1f}m")
+
     # Group players by position for valid transfers
     players_by_pos = {"GKP": [], "DEF": [], "MID": [], "FWD": []}
     for p in players:
@@ -824,15 +837,16 @@ def optimize_transfers_two_stage(
         # Generate single transfer options
         for p_out in current_players:
             selling_price = selling_prices.get(p_out.id, p_out.cost)
-            
+            available_budget = selling_price + bank  # Include bank in budget
+
             # Only consider top N candidates per position to reduce computation
             candidates = players_by_pos[p_out.pos][:20]  # Top 20 by EP
-            
+
             for p_in in candidates:
-                # Check budget constraint
-                if p_in.cost > selling_price:
+                # Check budget constraint (include bank)
+                if p_in.cost > available_budget:
                     continue  # Can't afford
-                
+
                 # Check club constraint (max 3 per team)
                 new_squad_ids = [pid if pid != p_out.id else p_in.id for pid in current_squad]
                 team_counts = {}
@@ -840,17 +854,28 @@ def optimize_transfers_two_stage(
                     p = next((pl for pl in players if pl.id == pid), None)
                     if p:
                         team_counts[p.team] = team_counts.get(p.team, 0) + 1
-                
+
                 if team_counts.get(p_in.team, 0) > 3:
                     continue  # Would exceed club limit
-                
+
                 # Calculate EP gain (simple heuristic for initial filtering)
                 ep_gain = p_in.eph - p_out.eph
-                
+
+                # CRITICAL: Add large bonus for removing dead players
+                # Dead players (EP=0) provide no value, so removing them is high priority
+                is_removing_dead = p_out.id in dead_player_ids
+                if is_removing_dead:
+                    # Add bonus equal to a full season of expected points from the replacement
+                    # This ensures dead player removal is always prioritized
+                    dead_player_bonus = 50.0  # Large bonus to prioritize dead player removal
+                    ep_gain += dead_player_bonus
+                    log.info(f"Dead player transfer: {p_out.name} -> {p_in.name}, base gain={ep_gain - dead_player_bonus:.2f}, with bonus={ep_gain:.2f}")
+
                 transfer_options.append({
                     'transfers': [(p_out, p_in)],
                     'ep_gain': ep_gain,
-                    'budget_saved': selling_price - p_in.cost
+                    'budget_saved': selling_price - p_in.cost,
+                    'removes_dead': is_removing_dead
                 })
         
         # Sort by EP gain and take top candidates
@@ -860,31 +885,32 @@ def optimize_transfers_two_stage(
     elif max_transfers == 2:
         # Generate double transfer options
         # This allows for downgrade/upgrade combinations
-        
+
         # First, generate promising single transfers
         single_transfers = []
         for p_out in current_players:
             # p_out is a Player object, and selling_prices keys are player IDs
             selling_price = selling_prices.get(p_out.id, p_out.cost)
+            available_budget = selling_price + bank  # Include bank
             # For 2-transfers, include both upgrades AND downgrades
             # Sort by EP but also include some cheaper players for downgrade options
             all_candidates = players_by_pos[p_out.pos]
-            
+
             # Take top players by EP
             top_by_ep = all_candidates[:25]
-            
+
             # Also specifically include good cheaper options for downgrades
             # These help fund upgrades elsewhere
             cheaper = [p for p in all_candidates if p.cost < selling_price]
             cheaper.sort(key=lambda p: p.eph, reverse=True)
-            
+
             # Include some premium options too (for premium downgrades like Salah->Palmer)
-            premium_downgrades = [p for p in all_candidates 
+            premium_downgrades = [p for p in all_candidates
                                  if selling_price > 100 and  # If selling premium (>£10m)
                                  p.cost < selling_price and  # Cheaper option
                                  p.cost > selling_price - 50]  # But not too cheap (within £5m)
             premium_downgrades.sort(key=lambda p: p.eph, reverse=True)
-            
+
             # Combine all sets (avoid duplicates by ID)
             seen_ids = set()
             candidates = []
@@ -892,24 +918,31 @@ def optimize_transfers_two_stage(
                 if p.id not in seen_ids:
                     candidates.append(p)
                     seen_ids.add(p.id)
-            
+
             for p_in in candidates:
                 # Skip if same player
                 if p_in.id == p_out.id:
                     continue
-                    
+
                 # For 2-transfer combos, be more flexible with individual costs
-                # since one transfer can fund another
-                if p_in.cost > selling_price + 50:  # Allow up to £5m more expensive with savings elsewhere
+                # since one transfer can fund another (include bank)
+                if p_in.cost > available_budget + 50:  # Allow up to £5m more expensive with savings elsewhere
                     continue
-                    
+
                 ep_gain = p_in.eph - p_out.eph
+
+                # Add bonus for removing dead players
+                is_removing_dead = p_out.id in dead_player_ids
+                if is_removing_dead:
+                    ep_gain += 50.0  # Large bonus to prioritize dead player removal
+
                 budget_diff = selling_price - p_in.cost
                 single_transfers.append({
                     'out': p_out,
                     'in': p_in,
                     'ep_gain': ep_gain,
-                    'budget_diff': budget_diff
+                    'budget_diff': budget_diff,
+                    'removes_dead': is_removing_dead
                 })
         
         # Sort single transfers by EP gain
