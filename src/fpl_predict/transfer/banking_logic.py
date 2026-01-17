@@ -81,7 +81,7 @@ def evaluate_banking_decision(
     # RULE 2: If 2+ unavailable players, strongly prefer transferring now
     elif metrics['unavailable_players'] >= 2:
         should_bank = False
-        reasoning.append(f"Have {metrics['unavailable_players']} dead players - need immediate transfers")
+        reasoning.append(f"Have {metrics['unavailable_players']} dead players - don't bank")
         
     # RULE 3: If 1 unavailable player, transfer now unless banking advantage is huge
     elif metrics['unavailable_players'] == 1:
@@ -115,11 +115,17 @@ def evaluate_banking_decision(
         reasoning.append(f"Note: {metrics['low_ep_players']} players with very low EP")
     
     # Check if current best transfer would fix a dead player
+    removes_dead = False
     if not should_bank and current_changes:
         for change in current_changes:
             if change.get('out') in metrics['dead_players']:
                 reasoning.append(f"✓ Removes dead player ID {change['out']}")
-    
+                removes_dead = True
+
+        # If we have dead players but aren't removing one, explain why
+        if metrics['unavailable_players'] > 0 and not removes_dead:
+            reasoning.append(f"Note: {metrics['unavailable_players']} dead player(s) on bench, but best value transfer upgrades starting XI")
+
     # Final reasoning string
     final_reasoning = " | ".join(reasoning)
     

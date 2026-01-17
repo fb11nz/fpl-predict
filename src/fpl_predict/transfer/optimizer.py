@@ -1418,16 +1418,18 @@ def optimize_with_lp(
                 
                 # Handle single or multiple transfers
                 if 'transfer_out' in result and result['transfer_out']:
-                    # Single transfer
-                    output.append(f"OUT: {result['transfer_out'].name} ({result['transfer_out'].pos}) - £{result['transfer_out'].cost/10:.1f}m, EP: {result['transfer_out'].ep1:.2f}")
-                    output.append(f"IN:  {result['transfer_in'].name} ({result['transfer_in'].pos}) - £{result['transfer_in'].cost/10:.1f}m, EP: {result['transfer_in'].ep1:.2f}")
+                    # Single transfer - show both next GW and horizon total
+                    p_out = result['transfer_out']
+                    p_in = result['transfer_in']
+                    output.append(f"OUT: {p_out.name} ({p_out.pos}) - £{p_out.cost/10:.1f}m, EP: {p_out.eph:.1f} over {horizon} GWs ({p_out.ep1:.2f}/wk)")
+                    output.append(f"IN:  {p_in.name} ({p_in.pos}) - £{p_in.cost/10:.1f}m, EP: {p_in.eph:.1f} over {horizon} GWs ({p_in.ep1:.2f}/wk)")
                 else:
                     # Multiple transfers
                     for i, (p_out, p_in) in enumerate(zip(result['transfers_out'], result['transfers_in']), 1):
                         output.append(f"Transfer {i}:")
-                        output.append(f"  OUT: {p_out.name} ({p_out.pos}) - £{p_out.cost/10:.1f}m, EP: {p_out.ep1:.2f}")
-                        output.append(f"  IN:  {p_in.name} ({p_in.pos}) - £{p_in.cost/10:.1f}m, EP: {p_in.ep1:.2f}")
-                
+                        output.append(f"  OUT: {p_out.name} ({p_out.pos}) - £{p_out.cost/10:.1f}m, EP: {p_out.eph:.1f} over {horizon} GWs ({p_out.ep1:.2f}/wk)")
+                        output.append(f"  IN:  {p_in.name} ({p_in.pos}) - £{p_in.cost/10:.1f}m, EP: {p_in.eph:.1f} over {horizon} GWs ({p_in.ep1:.2f}/wk)")
+
                 output.append(f"EP gain over {horizon} GWs: {result['objective_improvement']:.2f}")
                 output.append("")
                 output.append(f"=== OPTIMAL LINEUP (Formation {result['formation']}) ===")
