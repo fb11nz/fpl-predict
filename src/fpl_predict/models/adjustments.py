@@ -3,7 +3,6 @@ Adjustments for model predictions to handle edge cases.
 """
 import pandas as pd
 import numpy as np
-from typing import Optional
 from ..utils.logging import get_logger
 
 log = get_logger(__name__)

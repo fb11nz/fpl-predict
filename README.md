@@ -9,7 +9,7 @@ A comprehensive machine learning system for Fantasy Premier League predictions a
 - **Weekly Transfer Recommendations**: Analyzes your existing team and suggests optimal transfers with banking strategy comparison
 - **Fixture-Based EP Predictions**: Per-gameweek expected points using FDR and venue adjustments
 - **Free Hit Team Generator**: Builds optimal 15-man Free Hit squads with budget optimization and haul-factor captaincy
-- **Chip Strategy (2025/26)**: Plans optimal usage of 8 chips (2 sets) with fixture analysis and urgency tracking
+- **Chip Strategy**: Plans all 8 chips (2 sets of 4) using the availability windows the API reports
 - **Competition Detection**: Data-driven identification of backup players and rotation risks
 - **Recent Transfer Detection**: Web scraping to adjust for new signings
 - **New Player Adjustments**: Smart handling of players with limited data to avoid harsh penalties
@@ -35,7 +35,7 @@ fpl myteam sync --entry YOUR_TEAM_ID
 fpl transfers recommend --consider-hits
 
 # Chip strategy and Free Hit planning
-fpl chips plan-2025 --use-myteam              # See when to use chips
+fpl chips plan --use-myteam                   # See when to use chips
 fpl chips free-hit --gw 9                     # Generate optimal Free Hit team
 fpl chips free-hit-analysis                   # Compare all gameweeks
 ```
@@ -155,12 +155,12 @@ fpl myteam prices    # Check if any players changed price
 
 ### Chip Strategy Commands
 
-#### `fpl chips plan-2025`
-Plans optimal chip usage for 2025/26 season with double chips system (8 total chips).
+#### `fpl chips plan`
+Plans all 8 chips (2 sets of 4, one per half of the season).
 
 Features:
-- **H1 Planning (GW1-19)**: Use-it-or-lose-it chips with urgency tracking
-- **H2 Planning (GW20-38)**: DGW/BGW predictions for optimal timing
+- **H1 Planning**: Use-it-or-lose-it chips with urgency tracking, windows read from the API
+- **H2 Planning**: DGW/BGW predictions for optimal timing
 - **Fixture-Based Analysis**: Per-gameweek EP predictions using FDR and venue
 - **Personalized Recommendations**: Based on your actual squad
 - **Haul Factor Captaincy**: Prioritizes high-ceiling players for Triple Captain
@@ -172,9 +172,9 @@ Options:
 
 Examples:
 ```bash
-fpl chips plan-2025                        # General chip strategy
-fpl chips plan-2025 --use-myteam           # Personalized for your team
-fpl chips plan-2025 --show-teams           # Include Free Hit team previews
+fpl chips plan                             # General chip strategy
+fpl chips plan --use-myteam                # Personalized for your team
+fpl chips plan --show-teams                # Include Free Hit team previews
 ```
 
 #### `fpl chips free-hit`
@@ -208,7 +208,7 @@ Features:
 
 Options:
 - `--gw-start N`: Starting gameweek (default: current GW)
-- `--gw-end N`: Ending gameweek (default: 19)
+- `--gw-end N`: Ending gameweek (default: the H1 chip deadline from the API)
 
 Examples:
 ```bash
@@ -244,20 +244,38 @@ fpl auth test --entry 5436936    # Test with specific team ID
 
 ### 1. Data Sources & Ingestion
 
-The system ingests data from multiple sources:
+| Source | What it gives | Where it lands |
+|:-------|:--------------|:---------------|
+| FPL API `bootstrap-static` | prices, ownership, status, scoring rules, chip windows | in memory, cached per run |
+| FPL API `element-summary` | per-gameweek history for the current season, previous-season totals | `data/processed/features.parquet` |
+| FPL API `fixtures` | fixture list, results once played | `data/raw/football-data/EPL_<season>_matches.parquet` |
+| `vaastav/Fantasy-Premier-League` | per-player-per-gameweek history, 2022-23 onward | `data/raw/fpl_history/<season>/player_gw.parquet` |
+| football-data.org | match results, fallback when the archive is unavailable | `data/raw/football-data/` |
+| Web scraping | mid-season transfer news | applied as xMins adjustments |
 
-- **FPL API** (`bootstrap-static`): Player stats, fixtures, teams
-  - Current season player data (prices, ownership, form)
-  - Fixture list with home/away teams
-  - Team metadata and strength ratings
+The gameweek archive is the training set: 113,260 player-gameweek rows across four seasons,
+with xG, xA and xGC from 2022-23 and the defensive-contribution components from 2025-26 (the
+season the rule was introduced). Rows are keyed on FPL's stable player `code`, because
+element ids are renumbered every summer. It also carries `xP`, FPL's own pre-deadline
+expected points, which is the baseline any model here has to beat.
 
-- **Football-Data.org**: Historical match results
-  - Past match scores and statistics
-  - Used for team strength calculations
+**Season handling.** `config.current_season()` flips in July, so nothing is pinned to a
+season number. Completed seasons are cached and reused; only the season in progress is
+re-pulled. A fetch that returns nothing leaves the stored file alone, which matters in
+August: the new season has no finished fixtures, and an earlier version rebuilt the combined
+match file from that empty result and dropped a whole season of history.
 
-- **Web Scraping**: Recent transfer detection
-  - Scrapes Premier League, Sky Sports, BBC for transfers
-  - Applies time-based penalties to newly transferred players
+**Team names.** Every source spells clubs differently ("Manchester City FC", "Man City",
+"Man Utd", "Man United"), so `data/teams.py` maps all of them onto one slug. Eight of twenty
+clubs used to resolve to two different keys depending on the source, which broke every join
+keyed on team name: Elo ratings, clean-sheet rates, team form and team quality were all
+computed under one spelling and looked up under another.
+
+- **Scoring rules** come from `bootstrap-static.game_config.scoring`, not from scraping the
+  help page, so a rule change is picked up on the next run. 2026/27 raised goalkeeper goals
+  from 6 to 10 points. The only values not in the API are the defensive-contribution
+  thresholds (10 CBIT for defenders, 12 CBIRT for midfielders and forwards), which are
+  scraped with those constants as the fallback.
 
 ### 2. Preprocessing Pipeline
 
@@ -371,10 +389,28 @@ Running `fpl update --run` triggers the complete pipeline, ensuring all fixes an
 
 ## Model Performance
 
-The system uses cross-validation to evaluate models:
-- Expected Points: MAE ~2.5 points
-- Minutes Prediction: Accuracy ~85% for starters
-- Clean Sheets: AUC-ROC ~0.72
+Not currently measured. The figures previously quoted here (MAE ~2.5, 85% minutes accuracy,
+CS AUC 0.72) were never produced by any code in this repo — `models/backtest.py` returns
+hardcoded constants and nothing calls it.
+
+A rolling-origin backtest over `data/raw/fpl_history/` is the next piece of work. Until it
+exists, treat the expected points as unvalidated, and note that FPL's own `ep_next` is
+blended into every prediction (see `ep_blend` below), so a large part of the output is not
+this project's own signal.
+
+Two known calibration problems, measured against 45,787 player-gameweek appearances from
+2022-23 to 2025-26 under the current scoring table:
+
+| Component            | Modelled | Actual (mean pts/appearance)          |
+|:---------------------|:---------|:--------------------------------------|
+| Saves                | no       | 0.66 for GKP (17% of their points)    |
+| Goals conceded       | no       | -0.50 GKP, -0.40 DEF                  |
+| Bonus                | no       | 0.17-0.36, and the strongest single predictor of a score after goals |
+| Cards                | no       | -0.07 to -0.17                        |
+| Defensive contribution | yes    | over-credited 3x for DEF, 4.5x for MID, 69x for FWD |
+
+Net effect: expected points over-rate defenders by roughly 68% and under-rate goalkeepers by
+roughly 20%.
 
 ## Recent Updates
 
@@ -387,7 +423,7 @@ The system uses cross-validation to evaluate models:
 - **Fixture Analysis**: Compare Free Hit value across all gameweeks with EP deltas
 
 ### Chip Strategy Improvements
-- **2025/26 Double Chips**: Plans optimal usage of 8 chips (2 sets of TC/BB/FH/WC)
+- **Double Chips**: Plans all 8 chips (2 sets of TC/BB/FH/WC)
 - **Fixture-Based EP**: Per-gameweek predictions using FDR and home/away adjustments
 - **Urgency Tracking**: H1 chips (GW1-19) have deadline pressure, H2 saved for DGWs
 - **FDR Bug Fix**: Corrected inverted FDR multiplier (low FDR now correctly = easier fixture)
@@ -464,7 +500,7 @@ MIT License - see LICENSE file for details
 |:-------------------------------------------|:-------------|
 | Minutes 1-59                               | 1            |
 | Minutes 60+                                | 2            |
-| Goal (GKP)                                 | 6            |
+| Goal (GKP)                                 | 10           |
 | Goal (DEF)                                 | 6            |
 | Goal (MID)                                 | 5            |
 | Goal (FWD)                                 | 4            |
