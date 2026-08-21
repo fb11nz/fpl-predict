@@ -7,7 +7,6 @@ the 2025/26 season that was already on disk.
 """
 
 import pandas as pd
-import pytest
 
 from src.fpl_predict.data import ingest
 from src.fpl_predict.data.ingest import (

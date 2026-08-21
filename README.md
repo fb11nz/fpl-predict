@@ -22,23 +22,42 @@ A comprehensive machine learning system for Fantasy Premier League predictions a
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 cp .env.example .env
+```
 
-# Authenticate (get token from FPL DevTools)
-fpl auth set-token --token "Bearer YOUR_TOKEN_HERE"
+## Weekly workflow
 
-# Advanced workflow with ensemble models
-fpl update --run --advanced
+The whole sequence, in order. Timings are measured, not estimated.
+
+```bash
+# 1. Pull data and produce expected points for the next gameweek   (~2 min)
+fpl update --run
+
+# 2. Sync your squad. Needed by steps 3b and 4; token expires hourly.
+fpl auth set-token --token "Bearer YOUR_TOKEN"
+fpl myteam sync --entry YOUR_TEAM_ID
+
+# 3a. Build a squad from scratch: gameweek 1, a wildcard, or a free hit
 fpl transfers optimize --use-lp --horizon 5 --bench-budget 180
 
-# Get transfer recommendations for existing team
-fpl myteam sync --entry YOUR_TEAM_ID
-fpl transfers recommend --consider-hits
+# 3b. Or, mid-season, get transfers for the squad you already have
+fpl transfers recommend --horizon 5 [--consider-hits] [--max-transfers 2]
 
-# Chip strategy and Free Hit planning
-fpl chips plan --use-myteam                   # See when to use chips
-fpl chips free-hit --gw 9                     # Generate optimal Free Hit team
-fpl chips free-hit-analysis                   # Compare all gameweeks
+# 4. Chip strategy
+fpl chips plan                                # all 8 chips, windows read from the API
+fpl chips free-hit --gw 9                     # a Free Hit XI for one gameweek
+fpl chips free-hit-analysis                   # compare gameweeks
 ```
+
+Step 1 is one command because pulling data and training are one pipeline: ingest results,
+refresh the gameweek archive, rebuild features and fixture difficulty, rebuild the panel, fit
+the model, predict the upcoming gameweek, then apply squad-role and availability adjustments.
+
+`--model shipped` reverts step 1 to the original expected-points model. It measures 34.3% XI
+capture against the default's ~42%, so it exists for comparison rather than use.
+
+**Sync before step 3b or 4.** FPL renumbers player ids every summer, so a `myteam_latest.json`
+from last season resolves to entirely different players and the output is confident nonsense
+rather than an error.
 
 ## Installation
 
@@ -389,28 +408,141 @@ Running `fpl update --run` triggers the complete pipeline, ensuring all fixes an
 
 ## Model Performance
 
-Not currently measured. The figures previously quoted here (MAE ~2.5, 85% minutes accuracy,
-CS AUC 0.72) were never produced by any code in this repo — `models/backtest.py` returns
-hardcoded constants and nothing calls it.
+Measured, at last, by `fpl backtest`. Rolling origin over the gameweek archive: walk forward
+one gameweek at a time, train only on what came before, score against what actually happened.
+151 gameweeks across 2022-23 to 2025-26.
 
-A rolling-origin backtest over `data/raw/fpl_history/` is the next piece of work. Until it
-exists, treat the expected points as unvalidated, and note that FPL's own `ep_next` is
-blended into every prediction (see `ep_blend` below), so a large part of the output is not
-this project's own signal.
+| Predictor | Spearman | XI points | XI capture | MAE |
+|:----------|---------:|----------:|-----------:|----:|
+| component model | 0.695 | 54.9 | 39.8% | 1.03 |
+| direct GBM | 0.691 | 52.0 | 37.8% | 1.05 |
+| **shipped design** | 0.592 | 46.9 | 34.3% | 1.43 |
+| mean points, last 5 | 0.684 | 46.3 | 33.9% | 1.09 |
+| position mean | 0.096 | 11.9 | 8.8% | 1.56 |
 
-Two known calibration problems, measured against 45,787 player-gameweek appearances from
-2022-23 to 2025-26 under the current scoring table:
+**XI points** is the number that matters: what the best legal XI implied by each ranking
+actually scored. MAE is reported but is a poor guide, because two thirds of the selection
+universe scores 0-2 and "everyone gets 2" scores well on it while being useless for picking a
+team.
 
-| Component            | Modelled | Actual (mean pts/appearance)          |
-|:---------------------|:---------|:--------------------------------------|
-| Saves                | no       | 0.66 for GKP (17% of their points)    |
-| Goals conceded       | no       | -0.50 GKP, -0.40 DEF                  |
-| Bonus                | no       | 0.17-0.36, and the strongest single predictor of a score after goals |
-| Cards                | no       | -0.07 to -0.17                        |
-| Defensive contribution | yes    | over-credited 3x for DEF, 4.5x for MID, 69x for FWD |
+### Read XI capture against the right ceiling
 
-Net effect: expected points over-rate defenders by roughly 68% and under-rate goalkeepers by
-roughly 20%.
+The percentage looks low, and it is easy to read 39.8% as "the model is 40% of the way to
+good". It is not. The denominator is a perfect-hindsight XI, which knows which centre-back
+scored a 90th-minute header and is unreachable by anything. The useful reference points:
+
+| Reference | XI points | % of oracle |
+|:----------|----------:|------------:|
+| perfect hindsight (oracle) | 137.2 | 100% |
+| knows every player's true season scoring rate | 60.3 | 44.0% |
+| **the same, blind to this gameweek's outcome** | **54.8** | **39.9%** |
+| **component model** | **54.9** | **40.0%** |
+| shipped design | 46.9 | 34.2% |
+| pick the most expensive legal XI | 45.7 | 33.3% |
+| random legal XI of plausible starters | 31.6 | 23.0% |
+| an XI of league-average players | 12.9 | 9.4% |
+
+The third row is the one to compare against: a forecaster with perfect knowledge of every
+player's underlying quality but no sight of this particular gameweek. It scores 54.8. So
+**39.8% is roughly what perfect knowledge of player quality gets you**, and the floor is 23%
+rather than 0%.
+
+Three things follow:
+
+- **The shipped design barely beats picking by price.** 46.9 against 45.7 for the most
+  expensive legal XI, with no model at all. It is also indistinguishable from averaging the
+  last five gameweeks (46.3), and its rank correlation is *worse* than that naive rule.
+- **The component model is a real improvement**: +8.0 XI points per gameweek over the shipped
+  design, better in 66.9% of gameweeks, consistent across all four seasons.
+- **The remaining headroom is not in player quality.** The component model already sits at the
+  quality-knowledge reference, so anything further has to come from information that reference
+  lacks: fixtures, venue, availability, doubles, rotation.
+
+### Is the fixture information being used?
+
+Yes, mostly. The effects are real and measurable in the data, within-player over 30,682
+appearances of 60+ minutes:
+
+| Effect | In the data | Model captures |
+|:-------|------------:|---------------:|
+| Home advantage | +0.363 pts (t = 10.5) | 76% |
+| Easiest minus hardest opponent | +0.706 pts | 73% |
+| Clean sheet rate, easiest vs hardest opponent | 28.0% vs 21.1% | — |
+| Goals, easiest vs hardest opponent | 0.244 vs 0.166 | — |
+
+"Model captures" comes from perturbing one context feature at a time on real rows and
+measuring how far the prediction moves. Where that signal lands is uneven:
+
+| Sub-model | Share of its gain from fixture context | Leading features |
+|:----------|---------------------------------------:|:-----------------|
+| clean sheet | 72.5% | team_gf_l10, opp_gf_l10, team_ga_l10 |
+| goals conceded | 69.1% | opp_gf_l10, team_gf_l10, team_ga_l10 |
+| saves | 29.4% | opp_gf_l10, selected, xgc_l5 |
+| assists | 14.9% | **value**, xa_per90_l10 |
+| bonus | 13.7% | selected, value, bps_l5 |
+| goals | 12.2% | **value**, xg_per90_l10 |
+| minutes band | 3.6% | mins_l3, mins_std_l5 |
+
+Three things worth knowing:
+
+- The **defensive** components are strongly fixture-aware; the **attacking** ones barely are.
+- The goals and assists models lean on **price** more than on expected-goals rate. Price is an
+  effective proxy for quality, but it means part of the model is "expensive players score".
+- Venue effects are position-dependent and unevenly learned: measured home advantage is +0.672
+  for forwards and the model captures only 49% of it, while for goalkeepers it over-reads
+  (+0.206 modelled against +0.129 measured).
+
+**Why this barely moves XI capture**: a fixture-adjusted top eleven overlaps ~75% with a
+quality-only top eleven, so even perfect fixture modelling can reorder about three of eleven
+players. Use MAE and Spearman to judge these features, not XI points. `fpl backtest --ablate`
+refits with each feature family withheld and reports all three.
+
+The previously quoted figures here (MAE ~2.5, 85% minutes accuracy, CS AUC 0.72) were never
+produced by any code in this repo. `models/backtest.py` returned hardcoded constants and
+nothing called it.
+
+### A trap worth knowing about
+
+The archive carries an `xP` column that looks like FPL's pre-deadline expected points and is
+the obvious baseline. **It is contaminated with post-match information.** Run
+`fpl backtest --leakage-check`:
+
+| Check | `fpl_xp` | Best lagged feature |
+|:------|---------:|--------------------:|
+| Correlation with this gameweek's points, players who did play | 0.613 | 0.187 |
+| Correlation with this gameweek's *bonus* | 0.434 | — |
+| AUC for whether an established starter played at all | 0.826 | 0.615 |
+
+Nothing predicts a single match's bonus points at 0.43 — bonus is decided inside the match.
+Used as a baseline it looks unbeatable at 65% XI capture, which is what makes it dangerous.
+This says nothing about the live API's `ep_next`, a genuine forward-looking figure that simply
+cannot be evaluated historically because past values are not recoverable.
+
+### What the shipped design gets wrong
+
+Measured over 45,787 appearances under the current scoring table:
+
+| Component | Modelled | Actual (mean pts/appearance) |
+|:----------|:---------|:-----------------------------|
+| Saves | no | 0.66 for GKP, 17% of their points |
+| Goals conceded | no | -0.50 GKP, -0.40 DEF |
+| Bonus | no | 0.17-0.36, strongest predictor of a score after goals |
+| Cards | no | -0.07 to -0.17 |
+| Defensive contribution | over-credited | 3x DEF, 4.5x MID, 69x FWD |
+
+The defensive-contribution formula is `min(rate / threshold, 0.8)`, which treats a player
+averaging the threshold as near-certain to clear it. The real hit rate at that average is
+about 50%, and across all appearances it is 21% DEF, 11% MID, 1% FWD. Net effect: expected
+points over-rate defenders by roughly 68% and under-rate goalkeepers by roughly 20%.
+
+The component model addresses all of these, which is where its +7.7 points come from.
+
+```bash
+fpl backtest                          # score every predictor
+fpl backtest --by-season              # check stability across seasons
+fpl backtest --leakage-check          # the xP evidence above
+fpl backtest --refresh-history         # re-pull the archive, rebuild the panel, then score
+```
 
 ## Recent Updates
 

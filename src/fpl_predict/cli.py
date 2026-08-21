@@ -22,16 +22,213 @@ def main() -> None:
 @click.option("--run", is_flag=True, help="Run the weekly update.")
 @click.option("--demo", is_flag=True, help="Use bundled sample data only.")
 @click.option("--advanced", is_flag=True, help="Use advanced ML models (XGBoost/ensemble).")
-def update_cmd(run: bool, demo: bool, advanced: bool) -> None:
+@click.option(
+    "--model",
+    type=click.Choice(["component", "shipped"]),
+    default="component",
+    show_default=True,
+    help="Expected-points model. 'component' measures 39.5% XI capture against the shipped "
+    "design's 34.3% over 151 backtested gameweeks; see `fpl backtest`.",
+)
+def update_cmd(run: bool, demo: bool, advanced: bool, model: str) -> None:
     if advanced:
         import os
 
         os.environ["FPL_USE_ADVANCED_MODELS"] = "true"
         click.echo("Advanced models enabled (XGBoost, ensemble, uncertainty quantification)")
     if run:
-        update_weekly_data(demo_mode=demo)
+        update_weekly_data(demo_mode=demo, model=model)
     else:
         click.echo("Use --run to execute the weekly update.")
+
+
+# --------------------- backtest --------------------- #
+@main.command("backtest")
+@click.option(
+    "--rebuild-panel",
+    is_flag=True,
+    default=False,
+    help="Rebuild the player-gameweek feature panel from the history archive first.",
+)
+@click.option(
+    "--refresh-history",
+    is_flag=True,
+    default=False,
+    help="Re-download the gameweek archive before rebuilding the panel.",
+)
+@click.option(
+    "--seasons",
+    type=str,
+    default="",
+    help="Comma-separated seasons to score, e.g. '2024,2025'. Default: all available.",
+)
+@click.option(
+    "--starters-only",
+    is_flag=True,
+    default=False,
+    help="Score only players with recent minutes, the harder universe.",
+)
+@click.option(
+    "--min-train-gws",
+    type=int,
+    default=38,
+    show_default=True,
+    help="Gameweeks of history held back before scoring starts.",
+)
+@click.option(
+    "--refit-every",
+    type=int,
+    default=6,
+    show_default=True,
+    help="Refit fitted predictors every N gameweeks.",
+)
+@click.option("--by-season", is_flag=True, default=False, help="Also break results down by season.")
+@click.option(
+    "--baselines-only",
+    is_flag=True,
+    default=False,
+    help="Score only the naive rules and the shipped design, skipping the trained models.",
+)
+@click.option(
+    "--leakage-check",
+    is_flag=True,
+    default=False,
+    help="Show why the archive's xP column cannot be used as a baseline.",
+)
+@click.option(
+    "--ablate",
+    is_flag=True,
+    default=False,
+    help="Refit the component model with each feature family withheld, to see which are "
+    "earning their keep. Slow: one full backtest per family.",
+)
+@click.option(
+    "--ablate-groups",
+    type=str,
+    default="",
+    help="Comma-separated feature families to ablate, e.g. 'opponent,venue'. Default: all.",
+)
+@click.option(
+    "--out",
+    "out_path",
+    type=str,
+    default="",
+    help="Write per-gameweek results to this parquet/csv path.",
+)
+def backtest_cmd(
+    rebuild_panel: bool,
+    refresh_history: bool,
+    seasons: str,
+    starters_only: bool,
+    min_train_gws: int,
+    refit_every: int,
+    by_season: bool,
+    baselines_only: bool,
+    leakage_check: bool,
+    ablate: bool,
+    ablate_groups: str,
+    out_path: str,
+) -> None:
+    """Score expected-points predictors against actual points, gameweek by gameweek."""
+    import pandas as pd
+
+    from .models.backtest import (
+        ablation_report,
+        default_baselines,
+        format_ablation,
+        format_summary,
+        leakage_report,
+        run_backtest,
+    )
+    from .models.panel import build_panel
+    from .models.points import candidate_models
+
+    if refresh_history:
+        from .data.fpl_history import build_history
+
+        click.echo("Refreshing the gameweek archive...")
+        build_history(refresh=True)
+        rebuild_panel = True
+
+    if rebuild_panel:
+        click.echo("Rebuilding the feature panel...")
+        build_panel()
+
+    if leakage_check:
+        click.echo("")
+        click.echo("Why the archive's xP is not a baseline:")
+        report = leakage_report()
+        report.columns = ["Check", "fpl_xp", "Best lagged feature"]
+        click.echo(report.to_markdown(index=False, floatfmt=".3f"))
+        click.echo("")
+        click.echo("A forecast cannot predict a single match's bonus points, nor know which")
+        click.echo("established starter was withdrawn. The column carries post-match info.")
+        click.echo("")
+
+    if ablate:
+        wanted = [g.strip() for g in ablate_groups.split(",") if g.strip()] or None
+        click.echo("")
+        click.echo("Feature ablation (component model, one full backtest per family)...")
+        report = ablation_report(groups=wanted, min_train_gws=min_train_gws)
+        click.echo("")
+        click.echo(format_ablation(report))
+        click.echo("")
+        click.echo("Read MAE and Spearman, not XI points: a fixture-adjusted top eleven")
+        click.echo("overlaps ~75% with a quality-only one, so the XI metric is insensitive")
+        click.echo("to fixture information by construction.")
+        return
+
+    season_list = [int(s) for s in seasons.split(",") if s.strip()] or None
+    predictors = default_baselines() if baselines_only else default_baselines() + candidate_models()
+
+    summary, per_gw = run_backtest(
+        predictors=predictors,
+        seasons=season_list,
+        starters_only=starters_only,
+        min_train_gws=min_train_gws,
+        refit_every=refit_every,
+    )
+    if summary.empty:
+        click.echo("No results. Try --rebuild-panel.")
+        return
+
+    click.echo("")
+    click.echo(format_summary(summary))
+    click.echo("")
+    click.echo("XI points is the decision-relevant number: what the best legal XI implied by")
+    click.echo("each ranking actually scored. Oracle XI is the best possible in hindsight.")
+
+    if by_season:
+        rows = []
+        for name, df in per_gw.items():
+            for season, g in df.groupby("season"):
+                rows.append(
+                    {
+                        "predictor": name,
+                        "season": int(season),
+                        "gws": len(g),
+                        "spearman": g.spearman.mean(),
+                        "xi_capture": 100 * g.xi_capture.mean(),
+                    }
+                )
+        d = pd.DataFrame(rows)
+        click.echo("")
+        click.echo("XI capture % by season:")
+        click.echo(
+            d.pivot_table(index="predictor", columns="season", values="xi_capture").to_markdown(
+                floatfmt=".1f"
+            )
+        )
+
+    if out_path:
+        combined = pd.concat(
+            [df.assign(predictor=name) for name, df in per_gw.items()], ignore_index=True
+        )
+        if out_path.endswith(".csv"):
+            combined.to_csv(out_path, index=False)
+        else:
+            combined.to_parquet(out_path, index=False)
+        click.echo(f"\nWrote {len(combined)} rows → {out_path}")
 
 
 # --------------------- auth --------------------- #

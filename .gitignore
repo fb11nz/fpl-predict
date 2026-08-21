@@ -51,3 +51,4 @@ reports/
 
 # Cache
 .cache/
+.ruff_cache/

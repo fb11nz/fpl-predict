@@ -201,6 +201,16 @@ class ChipStrategy:
         self._detected_bgws: List[int] = []
         self._outstanding_fixtures: Dict[str, int] = {}
 
+    def _deadline_date(self, gw: int) -> str:
+        """Calendar date of a gameweek's deadline, from the API rather than hardcoded."""
+        try:
+            for ev in get_bootstrap().get("events", []):
+                if int(ev["id"]) == int(gw) and ev.get("deadline_time"):
+                    return pd.to_datetime(ev["deadline_time"]).strftime("%-d %b")
+        except Exception:
+            pass
+        return "date unknown"
+
     def _chip_start(self, half: str, code: str, current_gw: int) -> int:
         """Earliest gameweek a chip may be played, never earlier than the current one."""
         floor = self.h2_start if half == "H2" else 1
@@ -248,7 +258,11 @@ class ChipStrategy:
 
         if explain:
             self._explain_strategy(
-                recommendations, current_gw, show_teams=show_teams, used_chips=used_chips
+                recommendations,
+                current_gw,
+                show_teams=show_teams,
+                used_chips=used_chips,
+                owned_ids=owned_ids,
             )
 
         return recommendations
@@ -1761,19 +1775,28 @@ class ChipStrategy:
         current_gw: int,
         show_teams: bool = False,
         used_chips: Set[str] = None,
+        owned_ids: Set[int] = None,
     ):
         """Explain the strategy to user"""
 
         if used_chips is None:
             used_chips = set()
 
+        from ..config import current_season, season_label
+
         print("\n" + "=" * 70)
-        print("FPL 2025/26 CHIP STRATEGY - DOUBLE CHIPS SYSTEM")
+        print(f"FPL {season_label(current_season())} CHIP STRATEGY - DOUBLE CHIPS SYSTEM")
         print("=" * 70)
 
         print(f"\n📅 Current: GW{current_gw}")
-        print(f"⏰ H1 Deadline: GW19 (30 Dec)")
-        print(f"🔄 H2 Starts: GW20")
+        print(f"⏰ H1 Deadline: GW{self.h1_deadline} ({self._deadline_date(self.h1_deadline)})")
+        print(f"🔄 H2 Starts: GW{self.h2_start}")
+        if not owned_ids:
+            print(
+                "\n⚠️  No squad loaded, so Triple Captain and Bench Boost cannot be assessed"
+                "\n   and the Free Hit gain below is the optimal XI, not a gain over your own."
+                "\n   Run `fpl myteam sync --entry YOUR_ID` for a personalised plan."
+            )
 
         # Show used chips if any
         if used_chips:
