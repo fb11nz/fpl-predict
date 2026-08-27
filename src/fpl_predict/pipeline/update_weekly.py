@@ -169,19 +169,3 @@ def update_weekly_data(demo_mode: bool = False, model: str = "component") -> Non
     )
 
 
-def main() -> None:
-    import argparse
-
-    p = argparse.ArgumentParser()
-    p.add_argument("--run", action="store_true")
-    p.add_argument("--demo", action="store_true")
-    p.add_argument("--model", choices=["component", "shipped"], default="component")
-    args = p.parse_args()
-    if args.run:
-        update_weekly_data(demo_mode=args.demo, model=args.model)
-    else:
-        log.info("Use --run to execute the weekly update.")
-
-
-if __name__ == "__main__":
-    main()

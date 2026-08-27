@@ -1,7 +1,7 @@
 # src/fpl_predict/config.py
 from __future__ import annotations
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, field_validator
 import datetime as _dt
 
 # Number of completed seasons of history to ingest by default. Five seasons is roughly the
@@ -35,7 +35,6 @@ class Settings(BaseSettings):
 
     # --- External API tokens (optional) ---
     FOOTBALL_DATA_TOKEN: str | None = None  # Football-Data.org
-    ODDS_API_TOKEN: str | None = None  # Any odds API you use
 
     # --- Ingestion window (optional; defaults if unset) ---
     # Example: 2023 means the 2023/24 season
@@ -46,17 +45,19 @@ class Settings(BaseSettings):
         description="How many completed seasons of history to ingest when the window is not pinned.",
     )
 
-    # --- Toggles ---
-    ALLOW_RULES_FALLBACK: bool = True
-    ALLOW_ODDS_FALLBACK: bool = True
-    AFCON_GW16_5FT: bool = False
-
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
     )
+
+    @field_validator("FPL_ENTRY_ID", "FD_START_SEASON", "FD_END_SEASON", mode="before")
+    @classmethod
+    def _blank_to_none(cls, v):
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v
 
     def current_season(self) -> int:
         """Start year of the season in progress."""

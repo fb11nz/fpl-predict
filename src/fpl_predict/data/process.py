@@ -252,16 +252,6 @@ def _seed_features_from_fpl() -> pd.DataFrame:
     return df
 
 
-def _add_current_season_performance(df: pd.DataFrame) -> pd.DataFrame:
-    """Add aggregated performance metrics from current season games."""
-    # Performance data is now already included in _seed_features_from_fpl
-    # This function is kept for compatibility but no longer needs to fetch data
-    log.info(
-        f"Performance data already included: sample player has goals_l5={df.iloc[0].get('goals_l5', 0):.0f}"
-    )
-    return df
-
-
 FIXTURE_COLS = [
     "season",
     "match_id",

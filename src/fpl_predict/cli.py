@@ -21,7 +21,6 @@ def main() -> None:
 @main.command("update")
 @click.option("--run", is_flag=True, help="Run the weekly update.")
 @click.option("--demo", is_flag=True, help="Use bundled sample data only.")
-@click.option("--advanced", is_flag=True, help="Use advanced ML models (XGBoost/ensemble).")
 @click.option(
     "--model",
     type=click.Choice(["component", "shipped"]),
@@ -30,12 +29,7 @@ def main() -> None:
     help="Expected-points model. 'component' measures 39.5% XI capture against the shipped "
     "design's 34.3% over 151 backtested gameweeks; see `fpl backtest`.",
 )
-def update_cmd(run: bool, demo: bool, advanced: bool, model: str) -> None:
-    if advanced:
-        import os
-
-        os.environ["FPL_USE_ADVANCED_MODELS"] = "true"
-        click.echo("Advanced models enabled (XGBoost, ensemble, uncertainty quantification)")
+def update_cmd(run: bool, demo: bool, model: str) -> None:
     if run:
         update_weekly_data(demo_mode=demo, model=model)
     else:

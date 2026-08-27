@@ -98,15 +98,13 @@ Updates FPL data and optionally trains models.
 
 Options:
 - `--run`: Actually run the update (otherwise just shows what would happen)
-- `--advanced`: Use XGBoost/LightGBM ensemble models instead of basic models
-- `--rebuild-features`: Force rebuild feature engineering
-- `--rebuild-models`: Force retrain all models
+- `--demo`: Use bundled sample data only, skipping live ingestion
+- `--model {component,shipped}`: Expected-points model (default `component`; measures better in backtests, see `fpl backtest`)
 
 Examples:
 ```bash
-fpl update --run                    # Basic update and training
-fpl update --run --advanced         # Use advanced models
-fpl update --run --rebuild-models   # Force retrain everything
+fpl update --run                    # Update and train with the default (component) model
+fpl update --run --model shipped    # Use the legacy model instead
 ```
 
 ### Transfer Commands
@@ -315,16 +313,10 @@ Data flows through several preprocessing steps:
 
 ### 3. Model Training
 
-The system trains multiple specialized models:
+`fpl update --model {component,shipped}` selects which expected-points model runs (default `component`):
 
-#### Basic Models (default):
-- **Linear Regression**: Simple baseline predictions
-- **Random Forest**: Non-linear patterns
-
-#### Advanced Models (`--advanced` flag):
-- **XGBoost**: Gradient boosting for complex patterns
-- **LightGBM**: Fast gradient boosting
-- **Ensemble**: Weighted average of multiple models
+- **`component`**: per-component LightGBM models (minutes band, goals, assists, bonus, cards, clean sheets, goals conceded, saves, defensive contribution), combined into a single expected-points figure. Measures 39.5% XI capture over 151 backtested gameweeks.
+- **`shipped`**: the original Poisson-rate pipeline, blended with FPL's own `ep_next`. Measures 34.3% XI capture over the same backtest — kept for comparison, not recommended for regular use.
 
 #### Prediction Targets:
 - **Expected Points (EP)**: Total points prediction
@@ -587,11 +579,10 @@ FPL_AUTH_TOKEN=your_token_here    # From browser DevTools
 FPL_ENTRY_ID=5436936              # Your team ID
 FPL_EMAIL=your_email              # For password login
 FPL_PASSWORD=your_password        # For password login
-FOOTBALL_DATA_TOKEN=api_token     # For historical data
-
-# Behavior toggles
-ALLOW_RULES_FALLBACK=true        # Use rule-based models as fallback
-ALLOW_ODDS_FALLBACK=true         # Use odds data if available
+FOOTBALL_DATA_TOKEN=api_token     # For historical data (football-data.org); falls back to a CSV source if unset
+FD_START_SEASON=2023               # First historical season to ingest, e.g. 2023 = 2023/24 (defaults to a rolling window)
+FD_END_SEASON=2024                 # Last *completed* season to ingest; always advances to last season regardless of this value
+HISTORY_SEASONS=5                  # How many completed seasons to ingest when the window above is not pinned
 ```
 
 ## Troubleshooting

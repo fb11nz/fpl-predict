@@ -1572,106 +1572,6 @@ class ChipStrategy:
         fh_options.sort(key=lambda x: x["gap"], reverse=True)
         return fh_options[:top_n]
 
-    def _get_best_captain(
-        self, gw: int, owned_ids: Set[int], player_data: pd.DataFrame
-    ) -> Optional[Dict]:
-        """Get best captain for a gameweek from owned players only"""
-
-        # ALWAYS filter by owned players when use_myteam is enabled
-        if player_data.empty or not owned_ids:
-            return None
-
-        owned = player_data[player_data["player_id"].isin(owned_ids)]
-
-        # Captain from MID/FWD (prefer attackers)
-        captains = owned[owned["position"].isin([3, 4])]  # MID=3, FWD=4
-
-        # Fallback to DEF if no MID/FWD available
-        if captains.empty:
-            captains = owned[owned["position"] == 2]  # DEF=2
-
-        if captains.empty:
-            return None
-
-        best = captains.nlargest(1, "ep_blend").iloc[0]
-
-        return {
-            "name": best.get("name", "Unknown"),
-            "ep": best.get("ep_blend", 0),
-            "id": best.get("player_id"),
-        }
-
-    def _calculate_bench_ep(self, gw: int, owned_ids: Set[int], player_data: pd.DataFrame) -> float:
-        """Calculate expected bench points from owned players only"""
-
-        # ALWAYS calculate from owned players when use_myteam is enabled
-        if not owned_ids or player_data.empty:
-            return 0
-
-        owned = player_data[player_data["player_id"].isin(owned_ids)]
-
-        # Assume bottom 4 players by EP are bench
-        if len(owned) < 15:
-            return 0
-
-        bench = owned.nsmallest(4, "ep_blend")
-
-        # Only count bench players likely to play (xmins >= threshold)
-        playing = bench[bench["xmins"] >= self.config.bb_min_xmins]
-
-        # Return sum of playing bench players (even if less than 4)
-        # BB is still valuable if you have 2-3 good bench options
-        return playing["ep_blend"].sum()
-
-    def _calculate_fh_gap(self, gw: int, owned_ids: Set[int], player_data: pd.DataFrame) -> float:
-        """Calculate FH value based on gap between ideal XI and owned XI"""
-
-        # ALWAYS calculate from owned players when use_myteam is enabled
-        if not owned_ids or player_data.empty:
-            return 0
-
-        # Build ideal XI with formation constraints
-        # 1 GK, 3-5 DEF, 2-5 MID, 1-3 FWD
-        gks = player_data[player_data["position"] == 1].nlargest(1, "ep_blend")
-        defs = player_data[player_data["position"] == 2].nlargest(5, "ep_blend")
-        mids = player_data[player_data["position"] == 3].nlargest(5, "ep_blend")
-        fwds = player_data[player_data["position"] == 4].nlargest(3, "ep_blend")
-
-        # Try different formations and pick best
-        formations = [
-            (3, 5, 2),  # 352
-            (3, 4, 3),  # 343
-            (4, 4, 2),  # 442
-            (4, 3, 3),  # 433
-            (4, 5, 1),  # 451
-            (5, 3, 2),  # 532
-            (5, 4, 1),  # 541
-        ]
-
-        best_ideal_ep = 0
-        for n_def, n_mid, n_fwd in formations:
-            formation_team = pd.concat(
-                [gks.head(1), defs.head(n_def), mids.head(n_mid), fwds.head(n_fwd)]
-            )
-            if len(formation_team) == 11:
-                ep = formation_team["ep_blend"].sum()
-                best_ideal_ep = max(best_ideal_ep, ep)
-
-        # Owned XI - best 11 from owned players
-        owned = player_data[player_data["player_id"].isin(owned_ids)]
-        if len(owned) < 11:
-            return best_ideal_ep
-
-        # Must have at least 1 GK in owned XI
-        owned_gks = owned[owned["position"] == 1].nlargest(1, "ep_blend")
-        owned_others = owned[owned["player_id"].isin(owned_gks["player_id"]) == False].nlargest(
-            10, "ep_blend"
-        )
-        owned_xi = pd.concat([owned_gks, owned_others])
-        owned_xi_ep = owned_xi["ep_blend"].sum()
-
-        return max(0, best_ideal_ep - owned_xi_ep)
-
     def _find_best_captain_dgw(
         self,
         dgws: List[int],
@@ -1943,18 +1843,6 @@ class ChipStrategy:
 
 
 # ----------------------------- Entry Point -----------------------------
-
-
-def plan_chips(use_myteam: bool = True, explain: bool = True, show_teams: bool = False):
-    """
-    Plan the season's eight chips, two sets of four, using the windows the API reports.
-    """
-    strategy = ChipStrategy()
-    return strategy.plan_chips(use_myteam=use_myteam, explain=explain, show_teams=show_teams)
-
-
-# Retained so anything still importing the old season-stamped name keeps working.
-plan_chips_2025 = plan_chips
 
 
 def generate_free_hit_team(gw: int) -> str:

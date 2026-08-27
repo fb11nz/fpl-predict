@@ -6,8 +6,8 @@ from typing import Dict, Any, List, Tuple, Set, Optional
 import pandas as pd
 import numpy as np
 
-import requests
-
+from ..data.fpl_api import get_bootstrap as _fetch_bootstrap, get_fixtures as _fetch_fixtures
+from ..models.live import next_gameweek as _next_gameweek
 from ..utils.logging import get_logger
 from ..utils.io import read_parquet
 from ..utils.cache import PROC
@@ -68,37 +68,18 @@ class Player:
 
 
 # ------------------- data loaders -------------------
-def _fetch_bootstrap() -> dict:
-    r = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/", timeout=30)
-    r.raise_for_status()
-    return r.json()
+# _fetch_bootstrap / _fetch_fixtures are ..data.fpl_api's get_bootstrap/get_fixtures (imported
+# above under these names for call-site compatibility) — that module lru_caches both, which
+# also fixes _pergw_factors calling _fetch_fixtures once per player in _candidate_pool's loop.
 
 
 def _get_next_gameweek() -> int:
-    """Get the next gameweek number from FPL API."""
+    """The upcoming gameweek, or 1 if the schedule can't be read."""
     try:
-        bootstrap = _fetch_bootstrap()
-        # Find the next gameweek (is_next=True) or current gameweek (is_current=True)
-        next_gw = next((e["id"] for e in bootstrap.get("events", []) if e.get("is_next")), None)
-        if next_gw:
-            return next_gw
-        # Fallback to current gameweek if next is not set
-        current_gw = next(
-            (e["id"] for e in bootstrap.get("events", []) if e.get("is_current")), None
-        )
-        if current_gw:
-            return current_gw
-        # Final fallback
-        return 1
+        return _next_gameweek(_fetch_bootstrap()) or 1
     except Exception as e:
         log.warning(f"Could not get current gameweek: {e}")
         return 1
-
-
-def _fetch_fixtures() -> list:
-    r = requests.get("https://fantasy.premierleague.com/api/fixtures/", timeout=30)
-    r.raise_for_status()
-    return r.json()
 
 
 def _load_xmins() -> Dict[int, float]:
@@ -672,83 +653,28 @@ def _choose_xi_and_bench(
     return xi, bench, form
 
 
-# ------------------- helpers for advanced optimizer -------------------
-def _format_advanced_result(
-    result: Dict[str, Any], horizon: int, bench_budget: int
-) -> Dict[str, Any]:
-    """Format advanced optimizer result to match expected output format."""
-    squad = result.get("squad", [])
-    xi = result.get("starting_xi", [])
-    bench = result.get("bench", [])
-    captain = result.get("captain")
-    formation = result.get("formation", "442")
+def _lineup_lines(
+    xi_rows: List[Dict[str, Any]],
+    bench_rows: List[Dict[str, Any]],
+    captain_id: Optional[int] = None,
+    vice_id: Optional[int] = None,
+) -> List[str]:
+    """Shared 'Starting XI:'/'Bench:' text, from rows of {id, name, pos, ep, extra?}.
 
-    def fmt(p) -> str:
-        return f" - {p.name} ({p.position}) — ep1 {p.ep_next:.2f}, next{horizon} {sum(p.ep_horizon[:horizon]):.2f}, xMins {p.xmins:.0f}, £{p.price:.1f}m"
-
-    human = []
-    next_gw = _get_next_gameweek()
-    human.append(f"Suggested 15-man squad (LP Optimized), formation {formation}:")
-    human.append(f"Expected Points (GW{next_gw}): {result.get('expected_points_gw1', 0):.1f}")
-    human.append(f"Optimization Score: {result.get('optimization_score', 0):.1f}")
-    human.append("")
-
-    human.append("Full Squad:")
-    for p in squad:
-        human.append(fmt(p))
-    human.append("")
-
-    human.append("Starting XI:")
-    for p in xi:
-        marker = " (C)" if captain and p.id == captain.id else ""
-        human.append(fmt(p) + marker)
-    human.append("")
-
-    human.append("Bench:")
-    for i, p in enumerate(bench, 1):
-        human.append(f"{i}. {p.name} ({p.position}) — {p.ep_next:.2f} pts")
-    human.append("")
-
-    bench_cost = sum(p.price for p in bench)
-    human.append(f"Bench value: £{bench_cost:.1f}m (target max £{bench_budget / 10:.1f}m)")
-
-    if captain:
-        human.append(f"Captain: {captain.name} ({captain.position}) - {captain.ep_next:.2f} pts")
-
-    # Add transfer suggestions if present
-    if result.get("transfers_in") or result.get("transfers_out"):
-        human.append("")
-        human.append("Recommended Transfers:")
-        for p in result.get("transfers_in", []):
-            human.append(f"  IN: {p.name}")
-        for pid in result.get("transfers_out", []):
-            human.append(f"  OUT: Player {pid}")
-
-    return {
-        "human_readable": "\n".join(human),
-        "picked_ids": [p.id for p in squad],
-        "xi_ids": [p.id for p in xi],
-        "bench_ids": [p.id for p in bench],
-        "formation": formation,
-        "bench_cost": bench_cost,
-        "bench_budget": bench_budget / 10.0,
-        "captain_id": captain.id if captain else None,
-        "expected_points": result.get("expected_points_gw1", 0),
-        "optimization_score": result.get("optimization_score", 0),
-        "table": [
-            {
-                "player_id": p.id,
-                "name": p.name,
-                "pos": p.position,
-                "team_id": p.team,
-                "cost": p.price,
-                "xmins": p.xmins,
-                "ep1": p.ep_next,
-                f"next{horizon}": sum(p.ep_horizon[:horizon]),
-            }
-            for p in squad
-        ],
-    }
+    Every squad-building path here (two-stage LP, from-scratch LP, current-squad-only eval,
+    greedy) built this block by hand with near-identical logic. `extra` is an optional
+    pre-formatted suffix — e.g. ", xMins 72, £5.0m" — for callers that show more than points.
+    Rows are expected pre-sorted GKP/DEF/MID/FWD.
+    """
+    lines = ["Starting XI:"]
+    for r in xi_rows:
+        tag = " (C)" if r["id"] == captain_id else " (VC)" if r["id"] == vice_id else ""
+        lines.append(f" - {r['name']} ({r['pos']}) — {r['ep']:.2f} pts{r.get('extra', '')}{tag}")
+    lines.append("")
+    lines.append("Bench:")
+    for i, r in enumerate(bench_rows, 1):
+        lines.append(f" {i}. {r['name']} ({r['pos']}) — {r['ep']:.2f} pts{r.get('extra', '')}")
+    return lines
 
 
 # ------------------- Two-Stage Transfer Optimization -------------------
@@ -1602,20 +1528,16 @@ def optimize_with_lp(
                 output.append(f"EP gain over {horizon} GWs: {result['objective_improvement']:.2f}")
                 output.append("")
                 output.append(f"=== OPTIMAL LINEUP (Formation {result['formation']}) ===")
-                output.append("Starting XI:")
-                for p in sorted(
-                    result["xi"], key=lambda x: ["GKP", "DEF", "MID", "FWD"].index(x.pos)
-                ):
-                    status = ""
-                    if result["captain"] and p.id == result["captain"].id:
-                        status = " (C)"
-                    elif vice_captain and p.id == vice_captain.id:
-                        status = " (VC)"
-                    output.append(f" - {p.name} ({p.pos}) — {p.ep1:.2f} pts{status}")
-                output.append("")
-                output.append("Bench:")
-                for i, p in enumerate(result["bench"], 1):
-                    output.append(f" {i}. {p.name} ({p.pos}) — {p.ep1:.2f} pts")
+                cap_id = result["captain"].id if result["captain"] else None
+                vice_id = vice_captain.id if vice_captain else None
+                pos_order = {"GKP": 0, "DEF": 1, "MID": 2, "FWD": 3}
+                xi_sorted = sorted(result["xi"], key=lambda p: pos_order.get(p.pos, 9))
+                output += _lineup_lines(
+                    [{"id": p.id, "name": p.name, "pos": p.pos, "ep": p.ep1} for p in xi_sorted],
+                    [{"id": p.id, "name": p.name, "pos": p.pos, "ep": p.ep1} for p in result["bench"]],
+                    captain_id=cap_id,
+                    vice_id=vice_id,
+                )
                 output.append("")
                 if result["captain"]:
                     output.append(
@@ -1642,6 +1564,7 @@ def optimize_with_lp(
                             "eph": p.eph,
                             "xmins": p.xmins,
                             "is_captain": result["captain"] and p.id == result["captain"].id,
+                            "is_vice": vice_captain is not None and p.id == vice_captain.id,
                             "in_xi": p in result["xi"],
                         }
                         for p in result["squad"]
@@ -2124,11 +2047,6 @@ def optimize_with_lp(
                     # This prevents the LP from downgrading the XI through transfers
 
         # Solve
-        if current_squad and max_transfers > 0:
-            # Write LP to file for debugging
-            prob.writeLP("debug_transfer_lp.lp")
-            log.info("Wrote LP problem to debug_transfer_lp.lp")
-
         # Use CBC solver with options for finding optimal solution
         # CBC always finds global optimum for LP problems
         # We can add a small timeout to ensure it doesn't run forever
@@ -2383,20 +2301,16 @@ def optimize_with_lp(
                 f" - {p.name} ({p.pos}) — ep1 {p.ep1:.2f}, eph {p.eph:.2f}, xMins {p.xmins:.0f}, £{p.cost / 10:.1f}m{status}"
             )
 
-        output.append(f"\nStarting XI:")
-        for p in xi:
-            status = ""
-            if p.id == captain_id:
-                status = " (C)"
-            elif vice and p.id == vice.id:
-                status = " (V)"
-            output.append(
-                f" - {p.name} ({p.pos}) — ep1 {p.ep1:.2f}, eph {p.eph:.2f}, xMins {p.xmins:.0f}, £{p.cost / 10:.1f}m{status}"
-            )
+        def _detail(p: Player) -> str:
+            return f", eph {p.eph:.2f}, xMins {p.xmins:.0f}, £{p.cost / 10:.1f}m"
 
-        output.append(f"\nBench:")
-        for i, p in enumerate(bench, 1):
-            output.append(f"{i}. {p.name} ({p.pos}) — {p.ep1:.2f} pts")
+        output.append("")
+        output += _lineup_lines(
+            [{"id": p.id, "name": p.name, "pos": p.pos, "ep": p.ep1, "extra": _detail(p)} for p in xi],
+            [{"id": p.id, "name": p.name, "pos": p.pos, "ep": p.ep1, "extra": _detail(p)} for p in bench],
+            captain_id=captain_id,
+            vice_id=vice.id if vice else None,
+        )
 
         output.append(
             f"\nBench value: £{bench_value / 10:.1f}m (target max £{bench_budget / 10:.1f}m)"
@@ -2614,26 +2528,27 @@ def optimize_transfers(
         bench = [p for p in players if p["id"] not in xi_ids]
         bench.sort(key=lambda x: -x["ep"])  # Sort bench by EP
 
+        # Tag each player with the XI/captain flags the LP path also returns, so
+        # format_recommendation_output() (which reads these off "squad") shows the
+        # real XI/bench split instead of defaulting every player to in_xi=True.
+        for p in players:
+            p["in_xi"] = p["id"] in xi_ids
+            p["is_captain"] = p["id"] == captain_id
+            p["is_vice"] = p["id"] == vice_captain_id
+
         # Build human readable output with full lineup
         output = []
         output.append(f"Current squad evaluated: {total_ep:.1f} expected points")
         output.append("")
         output.append(f"=== OPTIMAL LINEUP (Formation {best_formation}) ===")
-        output.append("Starting XI:")
-
-        # Sort XI by position for display
-        for p in sorted(best_xi, key=lambda x: ["GKP", "DEF", "MID", "FWD"].index(x["position"])):
-            status = ""
-            if p["id"] == captain_id:
-                status = " (C)"
-            elif p["id"] == vice_captain_id:
-                status = " (VC)"
-            output.append(f" - {p['name']} ({p['position']}) — {p['ep']:.2f} pts{status}")
-
-        output.append("")
-        output.append("Bench:")
-        for i, p in enumerate(bench, 1):
-            output.append(f" {i}. {p['name']} ({p['position']}) — {p['ep']:.2f} pts")
+        pos_order = {"GKP": 0, "DEF": 1, "MID": 2, "FWD": 3}
+        xi_sorted = sorted(best_xi, key=lambda p: pos_order.get(p["position"], 9))
+        output += _lineup_lines(
+            [{"id": p["id"], "name": p["name"], "pos": p["position"], "ep": p["ep"]} for p in xi_sorted],
+            [{"id": p["id"], "name": p["name"], "pos": p["position"], "ep": p["ep"]} for p in bench],
+            captain_id=captain_id,
+            vice_id=vice_captain_id,
+        )
 
         output.append("")
         if captain:
@@ -2661,7 +2576,11 @@ def optimize_transfers(
 
         return {
             "squad": players,
-            "expected_points_gw1": total_ep,
+            # XI + captain bonus, matching how every transfer scenario (LP path) computes
+            # this field — total_ep (all 15, no captain double) is not comparable to that
+            # and was making "EP gain" figures compare inconsistent baselines.
+            "expected_points_gw1": best_ep,
+            "expected_points_total": best_ep,
             "total_cost": sum(p["cost"] for p in players),
             "human_readable": "\n".join(output),
             # Metadata for verbose reporting
@@ -2815,18 +2734,20 @@ def optimize_transfers(
     def fmt(p: Player) -> str:
         return f" - {p.name} ({p.pos}) — ep1 {p.ep1:.2f}, next{H} {p.eph:.2f}, xMins {p.xmins:.0f}, £{p.cost / 10:.1f}m"
 
+    def _detail(p: Player) -> str:
+        return f", next{H} {p.eph:.2f}, xMins {p.xmins:.0f}, £{p.cost / 10:.1f}m"
+
     human = []
     human.append(f"Suggested 15-man squad (budget 100.0m), formation {form}:")
     for p in picked:
         human.append(fmt(p))
     human.append("")
-    human.append("Starting XI:")
-    for p in xi:
-        human.append(fmt(p))
-    human.append("")
-    human.append("Bench:")
-    for p in bench:
-        human.append(fmt(p))
+    human += _lineup_lines(
+        [{"id": p.id, "name": p.name, "pos": p.pos, "ep": p.ep1, "extra": _detail(p)} for p in xi],
+        [{"id": p.id, "name": p.name, "pos": p.pos, "ep": p.ep1, "extra": _detail(p)} for p in bench],
+        captain_id=cap.id,
+        vice_id=vice.id,
+    )
     human.append("")
     human.append(f"Bench spend: £{_bench_cost(bench) / 10:.1f}m (cap £{bench_budget / 10:.1f}m)")
     human.append(f"Captain: {cap.name} ({cap.pos})")

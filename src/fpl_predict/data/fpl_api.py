@@ -34,10 +34,3 @@ def get_element_summary(pid: int) -> dict:
     r = requests.get(f"{BASE}/element-summary/{pid}/", headers=UA, timeout=30)
     r.raise_for_status()
     return r.json()
-
-
-def clear_caches() -> None:
-    """Drop cached API responses, for a long-running process that needs fresh data."""
-    get_bootstrap.cache_clear()
-    get_fixtures.cache_clear()
-    get_element_summary.cache_clear()
