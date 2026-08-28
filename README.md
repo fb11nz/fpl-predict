@@ -350,10 +350,10 @@ After training, several adjustments are applied:
 
 3. **Recent Transfer Adjustments** (`recent_transfers.py`):
    - Web scrapes for transfers in last 14 days
-   - Applies penalties:
-     - 0-3 days: 80% of original xMins
-     - 4-7 days: 65% of original xMins
-     - 8-14 days: 40% of original xMins
+   - Applies penalties (eased over time as the player settles in):
+     - 0-3 days: 20% of original xMins
+     - 4-7 days: 35% of original xMins
+     - 8-14 days: 60% of original xMins
 
 4. **New Player Adjustments** (`adjustments.py`):
    - Prevents harsh penalties for players with limited minutes (<180 mins)

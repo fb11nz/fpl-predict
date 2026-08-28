@@ -200,7 +200,17 @@ def fetch_season_gameweeks(season: int) -> pd.DataFrame:
     )
 
     codes = _season_player_codes(season)
-    df["player_code"] = pd.to_numeric(df.get("fpl_id"), errors="coerce").map(codes)
+    if codes:
+        df["player_code"] = pd.to_numeric(df.get("fpl_id"), errors="coerce").map(codes)
+    else:
+        # No stable code mapping for this season (players_raw.csv fetch failed). Fall back
+        # to the season-scoped id itself: not stable across seasons, but unique within this
+        # one, which is what matters here — _combine_cached()'s drop_duplicates keys on
+        # (season, gw, player_code, fixture_id), and pandas treats NaN == NaN as a match, so
+        # leaving this all-NaN (the previous behaviour) silently collapsed every player in a
+        # given fixture down to one surviving row for the whole season.
+        log.warning("%s: no stable player codes; using season-scoped ids for this season only", label)
+        df["player_code"] = pd.to_numeric(df.get("fpl_id"), errors="coerce")
     missing_codes = int(df["player_code"].isna().sum())
     if missing_codes:
         log.warning("%s: %d rows without a stable player code", label, missing_codes)
@@ -287,7 +297,13 @@ def _combine_cached() -> pd.DataFrame:
         return pd.DataFrame()
 
     combined = pd.concat(frames, ignore_index=True)
-    combined = combined.drop_duplicates(subset=["season", "gw", "player_code", "fixture_id"])
+    # drop_duplicates treats NaN == NaN as a match, which would collapse every row with a
+    # missing player_code (e.g. an individual player whose archive row lacked a stable code)
+    # down to one survivor per (season, gw, fixture_id) — those rows aren't known duplicates,
+    # just unidentifiable, so keep them all and only dedupe the ones with a real key.
+    has_code = combined["player_code"].notna()
+    keyed = combined[has_code].drop_duplicates(subset=["season", "gw", "player_code", "fixture_id"])
+    combined = pd.concat([keyed, combined[~has_code]], ignore_index=True)
     combined = combined.sort_values(["season", "gw", "player_code"], kind="stable")
     write_parquet(combined, HISTORY_DIR / "player_gw.parquet")
     log.info(

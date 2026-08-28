@@ -215,41 +215,50 @@ def aggregate_training_targets(match_data: pd.DataFrame) -> pd.DataFrame:
                 "target_minutes": target_minutes,
                 "target_goals": target_goals,
                 "target_assists": target_assists,
+                # Everything else here is diagnostic context for this aggregation, not a
+                # feature to train on directly — it's prefixed `tgt_` because several of
+                # these names (goals_l5, assists_l3, goals_per90, home_goals, form_trend, ...)
+                # collide with features.parquet's own, differently-computed columns of the
+                # same name. Merging two same-named columns makes pandas suffix both `_x`/`_y`,
+                # which silently zeroed out the real features.parquet versions in the model's
+                # input matrix (neither plain name existed anymore for _build_X_advanced's
+                # XCOLS lookup to find). Namespacing here fixes that without touching the
+                # legitimate features.parquet columns at all.
                 # Season totals (for context)
-                "season_minutes": total_minutes,
-                "season_goals": total_goals,
-                "season_assists": total_assists,
-                "season_points": player_matches["total_points"].sum(),
-                "season_matches": total_matches,
-                "season_starts": total_starts,
+                "tgt_season_minutes": total_minutes,
+                "tgt_season_goals": total_goals,
+                "tgt_season_assists": total_assists,
+                "tgt_season_points": player_matches["total_points"].sum(),
+                "tgt_season_matches": total_matches,
+                "tgt_season_starts": total_starts,
                 # Per-90 rates (for priors/validation)
-                "goals_per90": goals_per90,
-                "assists_per90": assists_per90,
-                "points_per90": points_per90,
+                "tgt_goals_per90": goals_per90,
+                "tgt_assists_per90": assists_per90,
+                "tgt_points_per90": points_per90,
                 # Recent form
-                "goals_l5": recent_goals,
-                "assists_l5": recent_assists,
-                "points_l5": recent_points,
-                "minutes_l5": recent_minutes,
-                "goals_l3": recent_3_goals,
-                "assists_l3": recent_3_assists,
-                "minutes_l3": recent_3_minutes,
+                "tgt_goals_l5": recent_goals,
+                "tgt_assists_l5": recent_assists,
+                "tgt_points_l5": recent_points,
+                "tgt_minutes_l5": recent_minutes,
+                "tgt_goals_l3": recent_3_goals,
+                "tgt_assists_l3": recent_3_assists,
+                "tgt_minutes_l3": recent_3_minutes,
                 # Expected stats
-                "xg_total": total_xg,
-                "xa_total": total_xa,
-                "xg_per90": (total_xg / total_minutes * 90) if total_minutes > 0 else 0,
-                "xa_per90": (total_xa / total_minutes * 90) if total_minutes > 0 else 0,
+                "tgt_xg_total": total_xg,
+                "tgt_xa_total": total_xa,
+                "tgt_xg_per90": (total_xg / total_minutes * 90) if total_minutes > 0 else 0,
+                "tgt_xa_per90": (total_xa / total_minutes * 90) if total_minutes > 0 else 0,
                 # Home/away
-                "home_goals": home_goals,
-                "away_goals": away_goals,
-                "home_assists": home_assists,
-                "away_assists": away_assists,
+                "tgt_home_goals": home_goals,
+                "tgt_away_goals": away_goals,
+                "tgt_home_assists": home_assists,
+                "tgt_away_assists": away_assists,
                 # Defensive
-                "clean_sheets": total_clean_sheets,
-                "goals_conceded": total_goals_conceded,
-                "saves": total_saves,
+                "tgt_clean_sheets": total_clean_sheets,
+                "tgt_goals_conceded": total_goals_conceded,
+                "tgt_saves": total_saves,
                 # Form trend
-                "form_trend": form_trend,
+                "tgt_form_trend": form_trend,
             }
         )
 

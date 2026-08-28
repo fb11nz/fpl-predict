@@ -147,9 +147,16 @@ def expected_points_df(
         dc_rate = dc_l5 if dc_l5 > 0 else dc_per90
 
         if dc_rate > 0:
-            # Calculate probability of hitting threshold per game
-            # DC includes all defensive actions (CBIT + recoveries + tackles)
-            prob_per_game = min(dc_rate / threshold, 0.8)  # Cap at 80% chance
+            # P(defensive actions this match >= threshold), modelling the count as Poisson
+            # with mean dc_rate — the same distributional assumption points.py's component
+            # model uses for goals-conceded/saves. A player who merely *averages* the
+            # threshold clears it in roughly half his games, not 80% of them: the previous
+            # `min(dc_rate / threshold, 0.8)` treated the rate-to-threshold ratio itself as a
+            # probability, which put most established defenders at the 0.8 cap regardless of
+            # how close to the threshold their actual rate was.
+            from scipy.stats import poisson
+
+            prob_per_game = float(poisson.sf(threshold - 1, dc_rate))
 
             # Expected points = 2 * probability * (xmins/90)
             return 2.0 * prob_per_game * (row_xmins / 90.0)

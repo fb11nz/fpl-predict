@@ -454,8 +454,9 @@ def recommend_weekly_transfers(
                 xmins_df = read_parquet(Path("data/processed/xmins.parquet"))
                 ep_map = dict(zip(ep_df['player_id'], ep_df['ep_adjusted']))
                 xmins_map = dict(zip(xmins_df['player_id'], xmins_df['xmins']))
-            except:
-                log.warning("Could not load predictions for banking logic")
+            except Exception as e:
+                log.warning(f"Could not load predictions for banking logic ({e}); "
+                            "unavailable-player detection will be skipped rather than guessed at")
                 ep_map = {}
                 xmins_map = {}
             

@@ -116,7 +116,18 @@ def _build_X_advanced(feats: pd.DataFrame) -> pd.DataFrame:
     """Build feature matrix with all available features."""
     X = pd.DataFrame(index=feats.index)
 
-    # Include all numeric columns except targets
+    # Include all numeric columns except targets and anything that leaks them. This used to
+    # just be the raw per-match outcome columns, but target_minutes/target_goals/target_assists
+    # themselves (build_training_targets.py's labels — a recent-N-game average, used because a
+    # genuinely future outcome doesn't exist yet at prediction time) were passing straight
+    # through into X unexcluded: the model was being fit with its own label as an input
+    # feature. mins_l3/mins_l5/goals_l3/goals_l5/assists_l3/assists_l5 are excluded too, since
+    # they're independently-computed features.parquet columns over the *same* recent-game
+    # window the targets are built from — not identical, but close enough to let the model
+    # "cheat" rather than learn from the rest of its inputs. tgt_* are build_training_targets.py's
+    # own diagnostic aggregates over that same window, namespaced specifically so they don't
+    # silently collide with (and previously zeroed out) these features.parquet columns; they
+    # leak just as directly as the target columns and are excluded for the same reason.
     exclude_cols = {
         "player_id",
         "minutes",
@@ -128,14 +139,29 @@ def _build_X_advanced(feats: pd.DataFrame) -> pd.DataFrame:
         "red_cards",
         "bonus",
         "total_points",
+        "target_minutes",
+        "target_goals",
+        "target_assists",
+        "mins_l3",
+        "mins_l5",
+        "goals_l3",
+        "goals_l5",
+        "assists_l3",
+        "assists_l5",
     }
 
     for col in feats.columns:
-        if col not in exclude_cols and pd.api.types.is_numeric_dtype(feats[col]):
+        if col in exclude_cols or str(col).startswith("tgt_"):
+            continue
+        if pd.api.types.is_numeric_dtype(feats[col]):
             X[col] = feats[col].fillna(0)
 
-    # Ensure we have the essential columns
+    # Ensure we have the essential columns — excluding the same leak-prone names as above;
+    # XCOLS lists mins_l3/mins_l5/goals_l3/goals_l5/assists_l3/assists_l5 as desired inputs,
+    # which would otherwise re-add exactly what the loop above just excluded.
     for c in XCOLS:
+        if c in exclude_cols:
+            continue
         if c not in X.columns and c in feats.columns:
             X[c] = feats[c].fillna(0)
         elif c not in X.columns:

@@ -761,7 +761,7 @@ class ChipStrategy:
         """Urgency factor for H1 chips, measured in gameweeks left before they expire."""
         gws_left = self.h1_deadline - current_gw
         if gws_left <= 0:
-            return 0.5  # Maximum urgency at the deadline itself
+            return self.config.h1_urgency_boost_gw19  # Maximum urgency at the deadline itself
         if gws_left == 1:
             return self.config.h1_urgency_boost_gw18
         if gws_left == 2:
@@ -901,7 +901,7 @@ class ChipStrategy:
                     # Map API chip names to our internal names
                     # Check if it's H1 or H2 based on start_event
                     start_event = chip.get("start_event", 1)
-                    half = "H1" if start_event < 20 else "H2"
+                    half = "H1" if start_event < self.h2_start else "H2"
 
                     if name == "wildcard":
                         used_chips.add(f"{half}_WC")
@@ -997,7 +997,7 @@ class ChipStrategy:
             # For each player in player_data
             for _, player in player_data.iterrows():
                 pid = player["player_id"]
-                base_ep = player.get("ep_blend", player.get("ep_adjusted", 0))
+                base_ep = player.get("ep_adjusted", player.get("ep_blend", 0))
                 team_name = player_teams.get(pid)
 
                 if not team_name or base_ep <= 0:
@@ -1599,10 +1599,10 @@ class ChipStrategy:
         if captains.empty:
             return None
 
-        best = captains.nlargest(1, "ep_blend").iloc[0]
+        best = captains.nlargest(1, "ep_adjusted").iloc[0]
 
         # Estimate DGW points as 2x single gameweek (conservative)
-        dgw_ep = best.get("ep_blend", 0) * 2.0
+        dgw_ep = best.get("ep_adjusted", 0) * 2.0
 
         return {"gw": available_dgws[0], "player": best.get("name", "Unknown"), "ep": dgw_ep}
 
@@ -1623,17 +1623,17 @@ class ChipStrategy:
         if len(owned) < 15:
             return None
 
-        bench = owned.nsmallest(4, "ep_blend")
+        bench = owned.nsmallest(4, "ep_adjusted")
 
         available_dgws = [gw for gw in dgws if gw not in (excluded_gws or set())]
 
         if available_dgws:
             # Estimate DGW bench points as 2x single gameweek
-            bench_ep = bench["ep_blend"].sum() * 2.0
+            bench_ep = bench["ep_adjusted"].sum() * 2.0
             return {"gw": available_dgws[-1], "bench_ep": bench_ep, "dgw_players": 4}
 
         # SGW fallback: pick best remaining SGW (GW34-37 range)
-        bench_ep = bench["ep_blend"].sum()
+        bench_ep = bench["ep_adjusted"].sum()
         excluded = excluded_gws or set()
         for gw in range(37, 27, -1):
             if gw not in excluded:
@@ -1714,8 +1714,8 @@ class ChipStrategy:
         h1_chips = {k: v for k, v in recommendations.items() if "H1_" in k}
         h2_chips = {k: v for k, v in recommendations.items() if "H2_" in k}
 
-        if current_gw <= 19:
-            remaining = 19 - current_gw + 1
+        if current_gw <= self.h1_deadline:
+            remaining = self.h1_deadline - current_gw + 1
             h1_used_count = len([c for c in used_chips if c.startswith("H1_")])
             remaining_chips = 4 - h1_used_count
             print(f"\n⚠️  {remaining} gameweeks left to use {remaining_chips} H1 chips!")
@@ -1724,12 +1724,12 @@ class ChipStrategy:
                 print("🚨 URGENT: Use your H1 chips NOW or lose them!")
 
         print("\n" + "-" * 35 + " FIRST HALF " + "-" * 35)
-        print("Must use before GW19 deadline - Use it or lose it!\n")
+        print(f"Must use before GW{self.h1_deadline} deadline - Use it or lose it!\n")
 
         for chip_key, rec in h1_chips.items():
             self._print_chip_recommendation(rec)
 
-        if not h1_chips and current_gw <= 19:
+        if not h1_chips and current_gw <= self.h1_deadline:
             h1_used_count = len([c for c in used_chips if c.startswith("H1_")])
             if h1_used_count == 4:
                 print("✅ All H1 chips have been used!")

@@ -3,6 +3,7 @@ Handle recent transfers that need integration time.
 Scrapes transfer data to identify recent moves.
 """
 
+import difflib
 import logging
 import requests
 from datetime import datetime, timedelta
@@ -305,12 +306,18 @@ def match_transfer_to_fpl(transfer_name: str, fpl_players: list) -> Optional[int
     """
     Match a transfer name to an FPL player ID.
 
+    Every tier requires the match to be unambiguous before accepting it: a scraped name that
+    matches more than one plausible player (e.g. two players sharing a surname — Silva,
+    Fernandes, Rodrigues are all common) is rejected rather than resolved to whichever
+    candidate happens to come first in bootstrap element order, since a wrong match applies
+    the "just transferred, discount minutes" penalty to an unrelated player.
+
     Args:
         transfer_name: Name from transfer news
         fpl_players: List of FPL player elements
 
     Returns:
-        Player ID if match found, None otherwise
+        Player ID if a single unambiguous match is found, None otherwise
     """
     # Clean the transfer name
     transfer_name = transfer_name.strip()
@@ -319,25 +326,68 @@ def match_transfer_to_fpl(transfer_name: str, fpl_players: list) -> Optional[int
     for suffix in [" (loan)", " (permanent)", " (free)", " (undisclosed)"]:
         transfer_name = transfer_name.replace(suffix, "")
 
-    # Try exact match first
-    for player in fpl_players:
-        if player["web_name"].lower() == transfer_name.lower():
-            return player["id"]
+    if not transfer_name:
+        return None
 
-    # Try last name match
-    transfer_last = transfer_name.split()[-1] if transfer_name else ""
-    for player in fpl_players:
-        if player["second_name"].lower() == transfer_last.lower():
-            # Verify it's the right player by checking if they're at a new club
-            # (ownership might be low if they just transferred)
-            if float(player.get("selected_by_percent", 0)) < 5.0:
-                return player["id"]
+    transfer_lower = transfer_name.lower()
+    transfer_last = transfer_name.split()[-1].lower()
 
-    # Try partial match
-    for player in fpl_players:
-        if transfer_last and transfer_last.lower() in player["web_name"].lower():
-            if float(player.get("selected_by_percent", 0)) < 5.0:
-                return player["id"]
+    def full_name(p: dict) -> str:
+        return f"{p.get('first_name', '')} {p.get('second_name', '')}".strip()
+
+    # Tier 1: exact match on web_name (FPL's own display name, unique per player)
+    exact = [p for p in fpl_players if p["web_name"].lower() == transfer_lower]
+    if len(exact) == 1:
+        return exact[0]["id"]
+
+    # Tier 2: exact match on full registered name
+    full_matches = [p for p in fpl_players if full_name(p).lower() == transfer_lower]
+    if len(full_matches) == 1:
+        return full_matches[0]["id"]
+
+    # Tier 3: last-name match, restricted to players not yet widely owned (a just-arrived
+    # signing plausibly is; an established player plausibly isn't, which is itself part of
+    # the signal here) — but only trusted if exactly one such candidate exists.
+    surname_candidates = [
+        p for p in fpl_players
+        if p.get("second_name", "").lower() == transfer_last
+        and float(p.get("selected_by_percent", 0) or 0) < 5.0
+    ]
+    if len(surname_candidates) == 1:
+        return surname_candidates[0]["id"]
+    if len(surname_candidates) > 1:
+        log.warning(
+            "Transfer name '%s' matches %d low-ownership players by surname (%s); "
+            "skipping rather than guessing",
+            transfer_name,
+            len(surname_candidates),
+            [p["web_name"] for p in surname_candidates],
+        )
+        return None
+
+    # Tier 4: fuzzy match on full name among low-ownership players, using a real similarity
+    # score rather than a bare substring check — `"Silva" in "Silvao"` or `"Rui" in "Ruiz"`
+    # would previously match unrelated players sharing a fragment. Requires both a high
+    # absolute similarity and a clear margin over the next-best candidate, so two similarly
+    # spelled names don't get resolved to an arbitrary pick either.
+    low_ownership = [p for p in fpl_players if float(p.get("selected_by_percent", 0) or 0) < 5.0]
+    scored = sorted(
+        (
+            (difflib.SequenceMatcher(None, transfer_lower, full_name(p).lower()).ratio(), p)
+            for p in low_ownership
+        ),
+        key=lambda t: t[0],
+        reverse=True,
+    )
+    if scored and scored[0][0] >= 0.75:
+        if len(scored) == 1 or (scored[0][0] - scored[1][0]) >= 0.15:
+            return scored[0][1]["id"]
+        log.warning(
+            "Transfer name '%s' has multiple close fuzzy matches (top %.2f vs next %.2f: "
+            "%s vs %s); skipping rather than guessing",
+            transfer_name, scored[0][0], scored[1][0],
+            scored[0][1]["web_name"], scored[1][1]["web_name"],
+        )
 
     return None
 
