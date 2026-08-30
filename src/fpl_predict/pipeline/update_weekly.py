@@ -133,6 +133,18 @@ def update_weekly_data(demo_mode: bool = False, model: str = "component") -> Non
     compute_fdr()
     build_player_next5_fdr()
 
+    # get_team_quality_scores() (used by the optimizer for team_att/team_strength) defaults
+    # to reusing team_quality.parquet if it exists and is never called with refresh=True
+    # anywhere else — once written, it would otherwise never be recalculated again, silently
+    # freezing every future update onto whichever seasons happened to be "the last two
+    # completed" the first time this ever ran, rather than sliding forward as seasons end.
+    try:
+        from ..data.team_quality import calculate_team_quality_from_data
+
+        calculate_team_quality_from_data()
+    except Exception as e:
+        log.warning("Could not refresh team quality scores: %s", e)
+
     # Step 3: Drop stale training data so it is rebuilt against current player stats
     training_data_file = PROC / "training_data.parquet"
     if training_data_file.exists():

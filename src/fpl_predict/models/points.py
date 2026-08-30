@@ -185,6 +185,9 @@ class ComponentPointsModel:
         default_factory=lambda: {"DEF": 10.0, "MID": 12.0, "FWD": 12.0}
     )
     dc_points: float = 2.0
+    penalty_save_points: float = 5.0
+    penalty_miss_points: float = -2.0
+    own_goal_points: float = -2.0
     # Feature names to withhold, for ablation. Note that `n_fixtures` still drives the
     # double-gameweek multiplier in `predict`, because that is structural arithmetic rather
     # than something the model learns; dropping it here only hides it from the sub-models.
@@ -204,6 +207,7 @@ class ComponentPointsModel:
     lgbm_params: Optional[Dict] = None
     columns: List[str] = field(default_factory=list)
     _parts: Dict[str, object] = field(default_factory=dict)
+    _own_goal_rate_per90: float = 0.0
 
     # ------------------------------------------------------------------ fitting
 
@@ -291,6 +295,37 @@ class ComponentPointsModel:
                 (keepers["saves"].astype(float) * per90.loc[keepers.index]).clip(upper=15),
             )
             self._parts["saves"] = m
+
+            if "penalties_saved" in keepers.columns and keepers["penalties_saved"].sum() > 0:
+                m = _lgbm("poisson", self.lgbm_params)
+                m.fit(
+                    _design(keepers, self.columns),
+                    (keepers["penalties_saved"].astype(float) * per90.loc[keepers.index]).clip(
+                        upper=2
+                    ),
+                )
+                self._parts["penalty_saves"] = m
+
+        # Penalty misses: rare, and there is no "who takes penalties" feature, but a rate
+        # model still lets the players who actually take (and occasionally miss) them show up
+        # as a small extra risk rather than pricing every position identically at zero.
+        if "penalties_missed" in played.columns and played["penalties_missed"].sum() > 0:
+            m = _lgbm("poisson", self.lgbm_params)
+            m.fit(
+                Xp, (played["penalties_missed"].astype(float) * per90).clip(upper=2)
+            )
+            self._parts["penalty_misses"] = m
+
+        # Own goals are close enough to a random per-appearance event (no real skill signal,
+        # unlike goals/assists/DC) that a learned per-player rate would mostly be fitting
+        # noise. A single league-wide per-90 rate keeps the small negative EV term honest
+        # about how predictable it actually is, rather than pretending otherwise.
+        if "own_goals" in played.columns:
+            total_og = float(played["own_goals"].astype(float).sum())
+            total_mins = float(played["minutes"].astype(float).sum())
+            self._own_goal_rate_per90 = (total_og / total_mins * 90.0) if total_mins > 0 else 0.0
+        else:
+            self._own_goal_rate_per90 = 0.0
 
         # Defensive contribution exists only from 2025-26, so this is fitted on whatever rows
         # actually carry it rather than on the whole panel.
@@ -430,12 +465,95 @@ class ComponentPointsModel:
             eligible = (pos != "GKP").to_numpy().astype(float)
             total += self.dc_points * p_dc * p_play * eligible
 
+        # Penalty saves, keepers only
+        pen_save90 = part("penalty_saves")
+        if pen_save90 is not None:
+            total += (
+                np.clip(pen_save90, 0, None)
+                * minutes_factor
+                * self.penalty_save_points
+                * (pos == "GKP").to_numpy().astype(float)
+            )
+
+        # Penalty misses — no "who takes penalties" feature exists, so this rides on whatever
+        # the rate model infers from goals/minutes/role; small and mostly-zero for most players
+        # is the correct answer here, not a bug.
+        pen_miss90 = part("penalty_misses")
+        if pen_miss90 is not None:
+            total += np.clip(pen_miss90, 0, None) * minutes_factor * self.penalty_miss_points
+
+        # Own goals: a single league-wide per-90 rate rather than a per-player model — see fit().
+        if self._own_goal_rate_per90:
+            total += (self._own_goal_rate_per90 / 90.0 * exp_minutes) * self.own_goal_points
+
         return pd.Series(total * fixtures, index=rows.index)
 
 
 def candidate_models() -> List[object]:
     """The models this project is trying to make work, for the backtest to rank."""
     return [DirectPointsModel(), ComponentPointsModel()]
+
+
+def _live_scoring_kwargs() -> Dict[str, object]:
+    """ComponentPointsModel field overrides sourced from the live FPL rules.
+
+    Without this, live prediction used ComponentPointsModel's hardcoded dataclass defaults
+    unconditionally — every instantiation of the model ignored rules_fetcher.py's live-fetched
+    scoring table entirely, even though that table is fetched fresh every `fpl update --run`
+    and correctly keeps the README's scoring section current. The numbers happen to agree
+    today, but a mid-season or new-season scoring change (FPL has changed goal/clean-sheet/DC
+    values before) would silently diverge: the README would show the new rule, the model would
+    keep scoring by the old one, with no warning anywhere that the two had split.
+
+    Falls back to ComponentPointsModel's own defaults for anything the live fetch doesn't
+    provide (e.g. `fetch_scoring_rules()` failed entirely, or a field genuinely isn't in the
+    API and only the scraped/hardcoded fallback is available), rather than raising — a model
+    with slightly-possibly-stale defaults is better than the pipeline crashing.
+    """
+    defaults = ComponentPointsModel()
+    try:
+        from ..data.rules_fetcher import fetch_scoring_rules
+
+        rules = fetch_scoring_rules()
+    except Exception as e:
+        log.warning("Could not fetch live scoring rules (%s); using built-in defaults", e)
+        return {}
+
+    goals = rules.get("goals") or {}
+    goal_points = {p: float(goals[p]) for p in ("GKP", "DEF", "MID", "FWD") if p in goals}
+
+    # rules_from_bootstrap drops a position from `clean_sheet` entirely when its value is 0
+    # (FWD normally is), so start from the model's own defaults and only overlay what the
+    # live table actually reports.
+    cs_points = dict(defaults.cs_points)
+    cs_points.update({p: float(v) for p, v in (rules.get("clean_sheet") or {}).items()})
+
+    dc = rules.get("defensive_contribution") or {}
+    def_thr = dc.get("defender_threshold_cbit")
+    mf_thr = dc.get("mid_fwd_threshold_cbirt")
+    dc_threshold = dict(defaults.dc_threshold)
+    if def_thr is not None:
+        dc_threshold["DEF"] = float(def_thr)
+    if mf_thr is not None:
+        dc_threshold["MID"] = dc_threshold["FWD"] = float(mf_thr)
+
+    kwargs: Dict[str, object] = {}
+    if goal_points:
+        kwargs["goal_points"] = {**defaults.goal_points, **goal_points}
+    if cs_points:
+        kwargs["cs_points"] = cs_points
+    if dc_threshold:
+        kwargs["dc_threshold"] = dc_threshold
+    if dc.get("points") is not None:
+        kwargs["dc_points"] = float(dc["points"])
+    if rules.get("penalty_save") is not None:
+        kwargs["penalty_save_points"] = float(rules["penalty_save"])
+    if rules.get("penalty_miss") is not None:
+        kwargs["penalty_miss_points"] = float(rules["penalty_miss"])
+    if rules.get("own_goal") is not None:
+        kwargs["own_goal_points"] = float(rules["own_goal"])
+
+    return kwargs
 
 
 def train_and_predict_gameweek(gw: Optional[int] = None) -> Dict[str, pd.DataFrame]:
@@ -467,7 +585,7 @@ def train_and_predict_gameweek(gw: Optional[int] = None) -> Dict[str, pd.DataFra
     gw = gw or next_gameweek(bootstrap)
     train, score = build_live_panel(gw, bootstrap)
 
-    model = ComponentPointsModel()
+    model = ComponentPointsModel(**_live_scoring_kwargs())
     log.info("Fitting the component model on %d player-gameweek rows...", len(train))
     model.fit(train)
 
