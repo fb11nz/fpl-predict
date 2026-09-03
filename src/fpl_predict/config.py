@@ -1,8 +1,18 @@
 # src/fpl_predict/config.py
 from __future__ import annotations
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, field_validator
 import datetime as _dt
+
+# pydantic-settings' own `env_file` reading (below) prioritises a real environment variable
+# over the .env file by design — which means a stale value already sitting in the shell (e.g.
+# exported by .envrc/direnv, or just left over from an earlier `export`) permanently shadows
+# whatever `fpl auth set-token`/`fpl auth set-cookie`/manual edits write to .env, with no
+# error or warning: the file updates correctly, the app just never sees it. `override=True`
+# makes the .env file this project actually manages win instead, which is what every command
+# that edits it (auth/login.py's set_token_env, set_cookie_env, pw_login) assumes happens.
+load_dotenv(override=True)
 
 # Number of completed seasons of history to ingest by default. Five seasons is roughly the
 # useful horizon: further back and squads, tactics and the FPL scoring rules have all moved
@@ -66,21 +76,26 @@ class Settings(BaseSettings):
     def seasons_window(self) -> tuple[int, int]:
         """(start, end) inclusive window of *completed* seasons to ingest.
 
-        Ends at last season, because the season in progress has no complete result set and
-        is fetched separately. FD_START_SEASON still anchors the start, but the end is
-        always carried forward to last season: a pinned end older than that is a leftover
-        from a previous season rather than a real instruction, and honouring it drops a
-        whole season of results on the floor.
+        Always ends at last season, ignoring FD_END_SEASON entirely — the season in progress
+        has no complete result set and is fetched separately (models/live.py pulls it
+        directly from the live FPL API). FD_START_SEASON still anchors the start. Older
+        FPL-predict versions let a pinned end lower than last season stand, which is how a
+        stale `.env` (FD_END_SEASON=2024 sitting there since the previous season) silently
+        dropped a whole completed season from ingestion after a rollover. The same field
+        pinned the *other* direction is just as wrong in the opposite way: once the community
+        archive this feeds starts publishing the new season's data (it usually lags a few
+        weeks), an end reaching into the season in progress duplicates every current-season
+        row against the live-API path that already covers it — caught loudly and correctly by
+        the "duplicated player-gameweek rows" assertion in models/panel.py, but only because
+        that assertion exists, not because this was guarded against. Since no pinned value is
+        actually safe to honour, the field no longer influences `end` at all.
         """
         cur = current_season()
         span = max(1, int(self.HISTORY_SEASONS))
         latest_complete = cur - 1
 
         start = int(self.FD_START_SEASON) if self.FD_START_SEASON else None
-        end = int(self.FD_END_SEASON) if self.FD_END_SEASON else None
-
-        if end is None or end < latest_complete:
-            end = latest_complete
+        end = latest_complete
         if start is None:
             start = end - span + 1
         return start, max(start, end)

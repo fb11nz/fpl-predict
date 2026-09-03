@@ -7,8 +7,10 @@ from ..utils.logging import get_logger
 
 log = get_logger(__name__)
 
-# Load .env file on module import
-load_dotenv()
+# override=True: this module's whole job is reading credentials this project's own commands
+# (set_token_env, set_cookie_env, pw_login) just wrote to .env — a stale value already sitting
+# in the shell environment (.envrc/direnv, or a leftover manual export) must not shadow it.
+load_dotenv(override=True)
 
 UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6_1) "
@@ -66,22 +68,25 @@ def get_auth_header_candidates() -> list[dict[str, str]]:
     candidate in order and fall back to the next on a 401/403 rather than trusting
     the first one blindly.
     """
+    # Referer/X-Api-Language mirror what the site's own frontend actually sends alongside
+    # this header (checked directly against a real browser request) — some APIs gate on
+    # Referer/Origin as a lightweight CSRF/bot check, which a bare Bearer header wouldn't
+    # satisfy on its own.
+    common = {
+        "User-Agent": UA,
+        "accept-language": "en",
+        "Referer": "https://fantasy.premierleague.com/",
+        "X-Api-Language": "en",
+    }
+
     candidates = []
     token = _env("FPL_AUTH_TOKEN")
     if token:
-        candidates.append({
-            "User-Agent": UA,
-            "accept-language": "en",
-            "x-api-authorization": f"Bearer {token}",
-        })
+        candidates.append({**common, "x-api-authorization": f"Bearer {token}"})
 
     cookie = _env("FPL_SESSION")
     if cookie:
-        candidates.append({
-            "User-Agent": UA,
-            "accept-language": "en",
-            "Cookie": cookie,
-        })
+        candidates.append({**common, "Cookie": cookie})
 
     if not candidates:
         raise RuntimeError(
